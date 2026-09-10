@@ -1,0 +1,21 @@
+# Test-only helper crate. Deliberately NOT a member of the svitek package's
+# build: it lives in its own directory with its own Cargo.toml so that
+# `cargo build` / `cargo test` in the repo root never sees it and the main
+# crate's dependency list stays free of test-only protocols.
+#
+#   CARGO_TARGET_DIR=$PWD/target cargo build --release \
+#       --manifest-path tools/inject/Cargo.toml
+[package]
+name = "svitek-inject"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "inject"
+path = "src/main.rs"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }

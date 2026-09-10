@@ -1,0 +1,424 @@
+[
+  {
+    "id": 4,
+    "type": "workspace",
+    "orientation": "horizontal",
+    "percent": null,
+    "urgent": false,
+    "marks": [],
+    "layout": "splith",
+    "border": "none",
+    "current_border_width": 0,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "width": 1280,
+      "height": 720
+    },
+    "deco_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "window_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "name": "1",
+    "window": null,
+    "nodes": [],
+    "floating_nodes": [
+      {
+        "id": 23,
+        "type": "floating_con",
+        "orientation": "none",
+        "percent": 0.37977430555555552,
+        "urgent": false,
+        "marks": [],
+        "focused": true,
+        "layout": "none",
+        "border": "pixel",
+        "current_border_width": 2,
+        "rect": {
+          "x": 290,
+          "y": 110,
+          "width": 700,
+          "height": 500
+        },
+        "deco_rect": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "window_rect": {
+          "x": 2,
+          "y": 2,
+          "width": 696,
+          "height": 496
+        },
+        "geometry": {
+          "x": 0,
+          "y": 0,
+          "width": 696,
+          "height": 496
+        },
+        "name": "one-floating",
+        "window": null,
+        "nodes": [],
+        "floating_nodes": [],
+        "focus": [],
+        "fullscreen_mode": 0,
+        "sticky": false,
+        "floating": "user_on",
+        "scratchpad_state": "none",
+        "pid": 68825,
+        "app_id": "foot",
+        "foreign_toplevel_identifier": "3f3e88e7f49d97a080564924e19b4d41",
+        "visible": true,
+        "max_render_time": 0,
+        "allow_tearing": false,
+        "shell": "xdg_shell",
+        "inhibit_idle": false,
+        "sandbox_engine": null,
+        "sandbox_app_id": null,
+        "sandbox_instance_id": null,
+        "tag": null,
+        "idle_inhibitors": {
+          "user": "none",
+          "application": "none"
+        }
+      }
+    ],
+    "focus": [
+      23,
+      22
+    ],
+    "fullscreen_mode": 1,
+    "sticky": false,
+    "floating": null,
+    "scratchpad_state": null,
+    "num": 1,
+    "output": "HEADLESS-1",
+    "representation": "H[foot]",
+    "focused": true,
+    "visible": true
+  },
+  {
+    "id": 24,
+    "type": "workspace",
+    "orientation": "horizontal",
+    "percent": null,
+    "urgent": false,
+    "marks": [],
+    "layout": "splith",
+    "border": "none",
+    "current_border_width": 0,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "width": 1280,
+      "height": 720
+    },
+    "deco_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "window_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "name": "2: web",
+    "window": null,
+    "nodes": [],
+    "floating_nodes": [],
+    "focus": [
+      25
+    ],
+    "fullscreen_mode": 1,
+    "sticky": false,
+    "floating": null,
+    "scratchpad_state": null,
+    "num": 2,
+    "output": "HEADLESS-1",
+    "representation": "H[XTerm]",
+    "focused": false,
+    "visible": false
+  },
+  {
+    "id": 26,
+    "type": "workspace",
+    "orientation": "horizontal",
+    "percent": null,
+    "urgent": false,
+    "marks": [],
+    "layout": "splith",
+    "border": "none",
+    "current_border_width": 0,
+    "rect": {
+      "x": 0,
+      "y": 0,
+      "width": 1280,
+      "height": 720
+    },
+    "deco_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "window_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "name": "alpha",
+    "window": null,
+    "nodes": [],
+    "floating_nodes": [],
+    "focus": [
+      27
+    ],
+    "fullscreen_mode": 1,
+    "sticky": false,
+    "floating": null,
+    "scratchpad_state": null,
+    "num": -1,
+    "output": "HEADLESS-1",
+    "representation": "H[foot]",
+    "focused": false,
+    "visible": false
+  },
+  {
+    "id": 28,
+    "type": "workspace",
+    "orientation": "vertical",
+    "percent": null,
+    "urgent": false,
+    "marks": [],
+    "layout": "splitv",
+    "border": "none",
+    "current_border_width": 0,
+    "rect": {
+      "x": 1280,
+      "y": 0,
+      "width": 1280,
+      "height": 720
+    },
+    "deco_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "window_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "name": "3",
+    "window": null,
+    "nodes": [],
+    "floating_nodes": [],
+    "focus": [
+      39,
+      31,
+      30
+    ],
+    "fullscreen_mode": 1,
+    "sticky": false,
+    "floating": null,
+    "scratchpad_state": null,
+    "num": 3,
+    "output": "HEADLESS-2",
+    "representation": "V[V[foot foot] foot foot]",
+    "focused": false,
+    "visible": true
+  },
+  {
+    "id": 32,
+    "type": "workspace",
+    "orientation": "horizontal",
+    "percent": null,
+    "urgent": false,
+    "marks": [],
+    "layout": "splith",
+    "border": "none",
+    "current_border_width": 0,
+    "rect": {
+      "x": 1280,
+      "y": 0,
+      "width": 1280,
+      "height": 720
+    },
+    "deco_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "window_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "name": "10",
+    "window": null,
+    "nodes": [],
+    "floating_nodes": [],
+    "focus": [
+      33
+    ],
+    "fullscreen_mode": 1,
+    "sticky": false,
+    "floating": null,
+    "scratchpad_state": null,
+    "num": 10,
+    "output": "HEADLESS-2",
+    "representation": "H[foot]",
+    "focused": false,
+    "visible": false
+  },
+  {
+    "id": 34,
+    "type": "workspace",
+    "orientation": "horizontal",
+    "percent": null,
+    "urgent": false,
+    "marks": [],
+    "layout": "splith",
+    "border": "none",
+    "current_border_width": 0,
+    "rect": {
+      "x": 1280,
+      "y": 0,
+      "width": 1280,
+      "height": 720
+    },
+    "deco_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "window_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "name": "media",
+    "window": null,
+    "nodes": [],
+    "floating_nodes": [],
+    "focus": [
+      35
+    ],
+    "fullscreen_mode": 1,
+    "sticky": false,
+    "floating": null,
+    "scratchpad_state": null,
+    "num": -1,
+    "output": "HEADLESS-2",
+    "representation": "H[foot]",
+    "focused": false,
+    "visible": false
+  },
+  {
+    "id": 37,
+    "type": "workspace",
+    "orientation": "horizontal",
+    "percent": null,
+    "urgent": false,
+    "marks": [],
+    "layout": "splith",
+    "border": "none",
+    "current_border_width": 0,
+    "rect": {
+      "x": 1280,
+      "y": 0,
+      "width": 1280,
+      "height": 720
+    },
+    "deco_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "window_rect": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "width": 0,
+      "height": 0
+    },
+    "name": "abc",
+    "window": null,
+    "nodes": [],
+    "floating_nodes": [],
+    "focus": [
+      38
+    ],
+    "fullscreen_mode": 1,
+    "sticky": false,
+    "floating": null,
+    "scratchpad_state": null,
+    "num": -1,
+    "output": "HEADLESS-2",
+    "representation": "H[foot]",
+    "focused": false,
+    "visible": false
+  }
+]

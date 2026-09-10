@@ -1,0 +1,27 @@
+[package]
+name = "svitek"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "svitek (Czech: scroll) — a Sway workspace switcher panel with thumbnails"
+repository = "https://github.com/movsq/svitek"
+
+[dependencies]
+swayipc = "4"
+gtk4 = { version = "0.11", features = ["v4_18"] }
+gtk4-layer-shell = { version = "0.8", features = ["v1_3"] }
+glib = "0.22"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+async-channel = "2"
+toml = "1"
+serde = { version = "1", features = ["derive"] }
+dirs = "7"
+libc = "0.2"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
