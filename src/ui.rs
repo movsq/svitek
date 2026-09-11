@@ -60,8 +60,10 @@
 //! window goes active, and a panel opened by a modifier that is already up
 //! commits at once instead of hanging there.
 //! While the panel is visible the rows are frozen: a focus change repaints CSS
-//! classes and never rebuilds, because rebuilding would destroy the row under
-//! the pointer and re-enter it.
+//! classes, a retitled window retypes one label, and neither rebuilds — because
+//! rebuilding would destroy the row under the pointer and re-enter it. Only a
+//! structural change (a workspace or a window appearing, vanishing, being
+//! renamed or reordered) builds new widgets.
 
 use crate::config::{Colors, Config, Mode, Position};
 use crate::model::{flags_only_change, Snapshot, Thumbnail, WindowInfo, WorkspaceInfo};
@@ -127,6 +129,14 @@ const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 const PREVIEW_GRACE: Duration = Duration::from_millis(150);
 
 /// A callback taking a workspace (name, num).
+///
+/// The **name** is what identifies the workspace: it is the key the thumbnail
+/// cache uses, and `ipc::switch_to` switches by name alone (`workspace <name>`
+/// finds a numbered workspace just as well, and the name is what sway reported
+/// for this very row). `num` is informational — carried through from
+/// `WorkspaceInfo::num` so a caller can tell a numbered workspace from a named
+/// one without parsing, and reserved for a future switch that wants it. Nothing
+/// in svitek acts on it today.
 pub type WorkspaceFn = Box<dyn Fn(&str, Option<i32>)>;
 
 /// What the panel asks the app to do.
@@ -278,7 +288,11 @@ impl Panel {
     /// strip of cards — with a click-swallowing scrim over the rest of the
     /// output. Does not show it. Installs the CSS built from `config.colors`.
     pub fn new(app: &gtk4::Application, config: &Config, callbacks: PanelCallbacks) -> Rc<Panel> {
-        let thumb_width = config.thumbnail_width.clamp(80, 1000) as i32;
+        // Already inside `config::THUMBNAIL_WIDTH` — `config::load` clamps it
+        // there once, for the panel and the capture thread alike, so the
+        // pictures the capturer produces are the size the cards are laid out
+        // for.
+        let thumb_width = config.thumbnail_width as i32;
         let panel_width = thumb_width + TEXT_COLUMN_WIDTH + CHROME_WIDTH;
         let centered = config.position == Position::Center;
 
@@ -557,11 +571,17 @@ impl Panel {
     /// available, a placeholder ("no preview yet") otherwise. Cheap enough to
     /// call on every `Msg::State` even while hidden.
     ///
-    /// While the panel is *visible* a change that is only focus/visibility
-    /// flags is applied in place instead of rebuilding: a hover preview is a
-    /// real workspace switch, so sway reports a focus change for every preview,
-    /// and rebuilding would destroy the row the pointer is on. See
-    /// `model::flags_only_change`.
+    /// While the panel is *visible* a change that leaves the rows and their
+    /// windows as they are — the focus/visibility flags, and the window titles
+    /// — is applied in place instead of rebuilding: a hover preview is a real
+    /// workspace switch, so sway reports a focus change for every preview, and
+    /// rebuilding would destroy the row the pointer is on and disarm the
+    /// hovering that was about to fire. Titles are in that set because they
+    /// change on their own (`top` in a terminal on a visible workspace) and
+    /// would otherwise kill a preview the user is in the middle of choosing.
+    /// A structural change — a workspace added, removed, renamed or moved, a
+    /// window opened, closed, reordered or given a different `app_id` — still
+    /// rebuilds. See `model::flags_only_change` and `apply_flags`.
     pub fn update(&self, snapshot: &Snapshot, output: &str, thumbs: &HashMap<String, Thumbnail>) {
         let wanted: Vec<WorkspaceInfo> = snapshot.on_output(output).cloned().collect();
 
@@ -571,7 +591,8 @@ impl Panel {
                 self.visible.get() && flags_only_change(&self.rendered.borrow(), &wanted);
             if in_place {
                 log::debug!(
-                    "focus flags changed while the panel is up; rows kept, classes repainted"
+                    "only flags and titles changed while the panel is up; \
+                     rows kept, classes and labels repainted"
                 );
                 self.apply_flags(&wanted);
             } else {
@@ -1037,7 +1058,17 @@ impl Panel {
         }
     }
 
-    /// Repaint the focus-derived CSS classes without touching the widget tree.
+    /// Apply everything that can be applied without touching the widget tree:
+    /// the focus-derived CSS classes, and the window titles.
+    ///
+    /// The titles are here because they change on their own — a terminal
+    /// running `top` retitles itself once a second — and rebuilding for that
+    /// while the panel is up would cancel the pending preview and disarm
+    /// hovering under a pointer that never moved. `model::flags_only_change`
+    /// guarantees the rows and their windows line up one for one, so zipping
+    /// is safe; `row.titles` is capped at the row's line limit, and `zip`
+    /// stops at the shorter of the two, which is exactly what the "+N more"
+    /// line stands for (and that line cannot change, the window count has not).
     fn apply_flags(&self, workspaces: &[WorkspaceInfo]) {
         for (row, ws) in self.rows.borrow().iter().zip(workspaces) {
             if self.is_marked_focused(ws) {
@@ -1046,6 +1077,10 @@ impl Panel {
                 row.root.remove_css_class("focused");
             }
             for (label, w) in row.titles.iter().zip(&ws.windows) {
+                let text = title_text(w);
+                if label.text().as_str() != text {
+                    label.set_text(text);
+                }
                 if w.focused {
                     label.add_css_class("win-focused");
                 } else {
@@ -1102,6 +1137,9 @@ impl Panel {
         name.set_halign(gtk4::Align::Start);
         name.set_valign(gtk4::Align::Start);
         name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        // A workspace can be named anything at all (`rename workspace to …`),
+        // newlines included; one line, always. See `window_line`.
+        name.set_single_line_mode(true);
         name.set_max_width_chars(18);
 
         let thumb = gtk4::Overlay::new();
@@ -1284,6 +1322,7 @@ fn window_list(ws: &WorkspaceInfo, card: bool, titles: &mut Vec<gtk4::Label>) ->
         empty.add_css_class("dim");
         empty.set_xalign(0.0);
         empty.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        empty.set_single_line_mode(true);
         empty.set_max_width_chars(if card { 8 } else { -1 });
         text.append(&empty);
     } else {
@@ -1296,6 +1335,7 @@ fn window_list(ws: &WorkspaceInfo, card: bool, titles: &mut Vec<gtk4::Label>) ->
             let more = gtk4::Label::new(Some(&format!("+{} more", ws.windows.len() - max_lines)));
             more.add_css_class("dim");
             more.set_xalign(0.0);
+            more.set_single_line_mode(true);
             text.append(&more);
         }
     }
@@ -1312,14 +1352,17 @@ fn window_list(ws: &WorkspaceInfo, card: bool, titles: &mut Vec<gtk4::Label>) ->
 /// actually has (`hexpand`), and the text that does not fit becomes an ellipsis
 /// instead of pushing the card out. The caps are tighter in a card because the
 /// budget there is the thumbnail's width, not a 260 px text column.
+///
+/// Both are also in single-line mode. Every one of these strings comes from
+/// sway, which passes on whatever the client set — and a title with a newline
+/// (or any other control character Pango treats as a line break) in it would
+/// otherwise make a two-line label, stretching the row and, because a card is
+/// as tall as the tallest in the strip, the whole panel with it. A window is
+/// one line whatever it calls itself.
 fn window_line(w: &WindowInfo, card: bool) -> (gtk4::Box, gtk4::Label) {
     let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
 
-    let title = gtk4::Label::new(Some(if w.title.is_empty() {
-        "(untitled)"
-    } else {
-        &w.title
-    }));
+    let title = gtk4::Label::new(Some(title_text(w)));
     title.add_css_class("title");
     if w.focused {
         title.add_css_class("win-focused");
@@ -1327,6 +1370,7 @@ fn window_line(w: &WindowInfo, card: bool) -> (gtk4::Box, gtk4::Label) {
     title.set_xalign(0.0);
     title.set_hexpand(true);
     title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    title.set_single_line_mode(true);
     title.set_max_width_chars(if card { 8 } else { 20 });
     line.append(&title);
 
@@ -1335,10 +1379,22 @@ fn window_line(w: &WindowInfo, card: bool) -> (gtk4::Box, gtk4::Label) {
         app.add_css_class("appid");
         app.set_xalign(1.0);
         app.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        app.set_single_line_mode(true);
         app.set_max_width_chars(if card { 8 } else { 12 });
         line.append(&app);
     }
     (line, title)
+}
+
+/// What a window's title label says: the title, or a placeholder when sway
+/// gives us none. One definition, because `build_row` writes it and
+/// `apply_flags` rewrites it.
+fn title_text(w: &WindowInfo) -> &str {
+    if w.title.is_empty() {
+        "(untitled)"
+    } else {
+        &w.title
+    }
 }
 
 /// Fold an accumulated scroll delta into whole wheel steps, and return what is
