@@ -113,14 +113,22 @@ pub fn config_path() -> Option<PathBuf> {
 /// Load the config, falling back to defaults. Returns `(config, Some(error))`
 /// when the file existed but could not be parsed.
 pub fn load() -> (Config, Option<String>) {
-    let Some(path) = config_path() else { return (Config::default(), None) };
+    let Some(path) = config_path() else {
+        return (Config::default(), None);
+    };
     match std::fs::read_to_string(&path) {
         Ok(text) => match toml::from_str::<Config>(&text) {
             Ok(c) => (c, None),
-            Err(e) => (Config::default(), Some(format!("{}: {}", path.display(), e))),
+            Err(e) => (
+                Config::default(),
+                Some(format!("{}: {}", path.display(), e)),
+            ),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), None),
-        Err(e) => (Config::default(), Some(format!("{}: {}", path.display(), e))),
+        Err(e) => (
+            Config::default(),
+            Some(format!("{}: {}", path.display(), e)),
+        ),
     }
 }
 
@@ -135,7 +143,8 @@ mod tests {
 
     #[test]
     fn partial_override() {
-        let c: Config = toml::from_str("thumbnail_width = 320\n[colors]\nfocused = \"#fff\"\n").unwrap();
+        let c: Config =
+            toml::from_str("thumbnail_width = 320\n[colors]\nfocused = \"#fff\"\n").unwrap();
         assert_eq!(c.thumbnail_width, 320);
         assert_eq!(c.colors.focused, "#fff");
         assert_eq!(c.colors.dim, Colors::default().dim);

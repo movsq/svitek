@@ -30,7 +30,10 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 /// Commands the GTK thread pushes to the capture thread.
 #[derive(Debug)]
 enum Cmd {
-    Request { output: String, reason: CaptureReason },
+    Request {
+        output: String,
+        reason: CaptureReason,
+    },
     SetPaused(bool),
     Shutdown,
 }
@@ -105,7 +108,10 @@ impl Capturer {
     /// Ask for one capture of `output` as soon as possible (ignores the
     /// throttle and the pause). Result arrives as `Msg::Frame` / `Msg::CaptureFailed`.
     pub fn request(&self, output: &str, reason: CaptureReason) {
-        self.send(Cmd::Request { output: output.to_string(), reason });
+        self.send(Cmd::Request {
+            output: output.to_string(),
+            reason,
+        });
     }
 
     /// Pause / resume the background loop. Paused while the panel is shown so
@@ -456,7 +462,9 @@ impl App {
         self.outputs.iter().position(|o| o.global == global)
     }
     fn find_by_name(&self, name: &str) -> Option<usize> {
-        self.outputs.iter().position(|o| o.name.as_deref() == Some(name))
+        self.outputs
+            .iter()
+            .position(|o| o.name.as_deref() == Some(name))
     }
     fn find_by_frame(&self, id: u64) -> Option<usize> {
         self.outputs
@@ -549,7 +557,11 @@ impl App {
                     log::warn!("capture: buffer allocation for {name} failed: {e}");
                     self.drop_pending(idx);
                     self.outputs[idx].next_due = Instant::now() + self.min_interval;
-                    self.emit(Msg::CaptureFailed { output: name, reason, error: e });
+                    self.emit(Msg::CaptureFailed {
+                        output: name,
+                        reason,
+                        error: e,
+                    });
                     return;
                 }
             }
@@ -641,7 +653,11 @@ impl App {
             rgba: Arc::from(rgba.into_boxed_slice()),
             taken_at: Instant::now(),
         };
-        self.emit(Msg::Frame { output: name, thumb, reason: p.reason });
+        self.emit(Msg::Frame {
+            output: name,
+            thumb,
+            reason: p.reason,
+        });
     }
 
     fn on_failed(&mut self, idx: usize) {
@@ -706,8 +722,7 @@ impl App {
             return;
         }
         self.outputs_dirty = false;
-        let mut names: Vec<String> =
-            self.outputs.iter().filter_map(|o| o.name.clone()).collect();
+        let mut names: Vec<String> = self.outputs.iter().filter_map(|o| o.name.clone()).collect();
         names.sort();
         if names == self.last_sent_outputs {
             return;
@@ -783,7 +798,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for App {
         qh: &QueueHandle<Self>,
     ) {
         match event {
-            wl_registry::Event::Global { name, interface, version } => match &interface[..] {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } => match &interface[..] {
                 "wl_shm" => {
                     if state.shm.is_none() {
                         state.shm = Some(registry.bind::<wl_shm::WlShm, _, _>(name, 1, qh, ()));
@@ -881,7 +900,12 @@ impl Dispatch<ZwlrScreencopyFrameV1, u64> for App {
             None => return,
         };
         match event {
-            zwlr_screencopy_frame_v1::Event::Buffer { format, width, height, stride } => {
+            zwlr_screencopy_frame_v1::Event::Buffer {
+                format,
+                width,
+                height,
+                stride,
+            } => {
                 let format = match format {
                     WEnum::Value(f) => f,
                     WEnum::Unknown(v) => {
@@ -895,7 +919,12 @@ impl Dispatch<ZwlrScreencopyFrameV1, u64> for App {
                 }
                 if let Some(p) = state.outputs[idx].pending.as_mut() {
                     if p.info.is_none() {
-                        p.info = Some(BufInfo { format, width, height, stride });
+                        p.info = Some(BufInfo {
+                            format,
+                            width,
+                            height,
+                            stride,
+                        });
                     }
                 }
                 // v1/v2 have no buffer_done: the single buffer event is the cue.
@@ -1017,7 +1046,7 @@ fn thread_main(
     }
     if app.manager.is_none() {
         let _ = init_tx.send(Err(
-            "compositor does not support zwlr_screencopy_manager_v1".into()
+            "compositor does not support zwlr_screencopy_manager_v1".into(),
         ));
         return;
     }
@@ -1078,8 +1107,16 @@ fn thread_main(
         };
         let wl_fd = guard.connection_fd().as_raw_fd();
         let mut fds = [
-            libc::pollfd { fd: wl_fd, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: wl_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
         let timeout = app.poll_timeout();
         let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
@@ -1187,10 +1224,22 @@ mod tests {
 
     #[test]
     fn format_offsets() {
-        assert_eq!(PixFmt::from_wl(wl_shm::Format::Xrgb8888), Some(PixFmt::Bgra));
-        assert_eq!(PixFmt::from_wl(wl_shm::Format::Argb8888), Some(PixFmt::Bgra));
-        assert_eq!(PixFmt::from_wl(wl_shm::Format::Xbgr8888), Some(PixFmt::Rgba));
-        assert_eq!(PixFmt::from_wl(wl_shm::Format::Abgr8888), Some(PixFmt::Rgba));
+        assert_eq!(
+            PixFmt::from_wl(wl_shm::Format::Xrgb8888),
+            Some(PixFmt::Bgra)
+        );
+        assert_eq!(
+            PixFmt::from_wl(wl_shm::Format::Argb8888),
+            Some(PixFmt::Bgra)
+        );
+        assert_eq!(
+            PixFmt::from_wl(wl_shm::Format::Xbgr8888),
+            Some(PixFmt::Rgba)
+        );
+        assert_eq!(
+            PixFmt::from_wl(wl_shm::Format::Abgr8888),
+            Some(PixFmt::Rgba)
+        );
         assert_eq!(PixFmt::from_wl(wl_shm::Format::Bgr888), Some(PixFmt::Rgb));
         assert_eq!(PixFmt::from_wl(wl_shm::Format::Rgb888), Some(PixFmt::Bgr));
         assert_eq!(PixFmt::from_wl(wl_shm::Format::Rgb565), None);

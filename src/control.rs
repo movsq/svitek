@@ -122,7 +122,10 @@ fn send_at(path: &Path, cmd: Command) -> Result<(), String> {
 
     match reply.trim() {
         "ok" => Ok(()),
-        "" => Err(not_running(path, "the running instance closed the connection")),
+        "" => Err(not_running(
+            path,
+            "the running instance closed the connection",
+        )),
         other => Err(format!(
             "svitek refused `{}`: {}",
             cmd.as_str(),

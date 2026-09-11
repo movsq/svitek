@@ -45,12 +45,17 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// Workspaces on `output`, in display order.
-    pub fn on_output<'a>(&'a self, output: &'a str) -> impl Iterator<Item = &'a WorkspaceInfo> + 'a {
+    pub fn on_output<'a>(
+        &'a self,
+        output: &'a str,
+    ) -> impl Iterator<Item = &'a WorkspaceInfo> + 'a {
         self.workspaces.iter().filter(move |w| w.output == output)
     }
     /// The workspace currently visible on `output`, if any.
     pub fn visible_on(&self, output: &str) -> Option<&WorkspaceInfo> {
-        self.workspaces.iter().find(|w| w.output == output && w.visible)
+        self.workspaces
+            .iter()
+            .find(|w| w.output == output && w.visible)
     }
 }
 
@@ -177,7 +182,11 @@ pub enum Msg {
         reason: CaptureReason,
     },
     /// A capture request failed or the output vanished; nothing to attribute.
-    CaptureFailed { output: String, reason: CaptureReason, error: String },
+    CaptureFailed {
+        output: String,
+        reason: CaptureReason,
+        error: String,
+    },
     /// The set of outputs the capturer knows about changed (names, in no particular order).
     CaptureOutputs(Vec<String>),
     /// A control-socket command.
@@ -222,7 +231,13 @@ mod tests {
         }
     }
 
-    fn ws(id: i64, name: &str, focused: bool, visible: bool, windows: Vec<WindowInfo>) -> WorkspaceInfo {
+    fn ws(
+        id: i64,
+        name: &str,
+        focused: bool,
+        visible: bool,
+        windows: Vec<WindowInfo>,
+    ) -> WorkspaceInfo {
         WorkspaceInfo {
             id,
             num: name.parse().ok(),

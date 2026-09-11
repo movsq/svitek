@@ -567,9 +567,12 @@ impl Panel {
 
         let changed = *self.rendered.borrow() != wanted;
         if changed {
-            let in_place = self.visible.get() && flags_only_change(&self.rendered.borrow(), &wanted);
+            let in_place =
+                self.visible.get() && flags_only_change(&self.rendered.borrow(), &wanted);
             if in_place {
-                log::debug!("focus flags changed while the panel is up; rows kept, classes repainted");
+                log::debug!(
+                    "focus flags changed while the panel is up; rows kept, classes repainted"
+                );
                 self.apply_flags(&wanted);
             } else {
                 self.rebuild(&wanted);
@@ -605,7 +608,9 @@ impl Panel {
         match monitor_for(output) {
             Some(m) => self.window.set_monitor(Some(&m)),
             None => {
-                log::warn!("no GDK monitor with connector {output:?}; using the compositor default");
+                log::warn!(
+                    "no GDK monitor with connector {output:?}; using the compositor default"
+                );
                 self.window.set_monitor(None);
             }
         }
@@ -721,7 +726,11 @@ impl Panel {
         }
         // Not the user hovering yet: the pointer has not moved since the panel
         // mapped, or it has barely had time to.
-        if self.shown_at.get().is_none_or(|t| t.elapsed() < PREVIEW_GRACE) {
+        if self
+            .shown_at
+            .get()
+            .is_none_or(|t| t.elapsed() < PREVIEW_GRACE)
+        {
             return;
         }
         self.hover_armed.set(true);
@@ -774,7 +783,11 @@ impl Panel {
         // Same grace as hovering, for the same reason: the panel must not
         // switch workspaces because of an event that was on its way in when it
         // mapped.
-        if self.shown_at.get().is_none_or(|t| t.elapsed() < PREVIEW_GRACE) {
+        if self
+            .shown_at
+            .get()
+            .is_none_or(|t| t.elapsed() < PREVIEW_GRACE)
+        {
             log::debug!("wheel ignored: within {PREVIEW_GRACE:?} of show()");
             return;
         }
@@ -867,11 +880,20 @@ impl Panel {
     /// else what is being previewed (the origin, until something moved it).
     /// `commit` does the rest.
     fn commit_selection_as(&self, why: &str) {
-        let pending = self.pending.borrow().as_ref().map(|p| (p.name.clone(), p.num));
+        let pending = self
+            .pending
+            .borrow()
+            .as_ref()
+            .map(|p| (p.name.clone(), p.num));
         let target = pending.or_else(|| {
             let previewed = self.previewed.borrow().clone();
             previewed.map(|name| {
-                let num = self.rows.borrow().iter().find(|r| r.name == name).and_then(|r| r.num);
+                let num = self
+                    .rows
+                    .borrow()
+                    .iter()
+                    .find(|r| r.name == name)
+                    .and_then(|r| r.num);
                 (name, num)
             })
         });
@@ -1237,7 +1259,11 @@ fn scroll_target(
 /// beside one. Appends every title label to `titles`, in `ws.windows` order, so
 /// `apply_flags` can move the `.win-focused` class without a rebuild.
 fn window_list(ws: &WorkspaceInfo, card: bool, titles: &mut Vec<gtk4::Label>) -> gtk4::Box {
-    let max_lines = if card { MAX_CARD_LINES } else { MAX_WINDOW_LINES };
+    let max_lines = if card {
+        MAX_CARD_LINES
+    } else {
+        MAX_WINDOW_LINES
+    };
 
     let text = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
     text.add_css_class("wins");
@@ -1455,7 +1481,8 @@ fn apply_thumb(row: &Row, thumb: &Thumbnail, thumb_width: i32) {
 fn clear_thumb(row: &Row, thumb_width: i32) {
     row.picture.set_paintable(gdk::Paintable::NONE);
     row.hint.set_visible(true);
-    row.thumb.set_size_request(thumb_width, thumb_width * 9 / 16);
+    row.thumb
+        .set_size_request(thumb_width, thumb_width * 9 / 16);
 }
 
 /// The `gdk::Monitor` whose connector name is `output`, if the display knows one.
@@ -1550,9 +1577,7 @@ fn css_color(value: &str, fallback: &str) -> String {
     let ok = if let Some(hex) = v.strip_prefix('#') {
         matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
     } else {
-        !v.is_empty()
-            && v.len() <= 32
-            && v.bytes().all(|b| b.is_ascii_alphabetic())
+        !v.is_empty() && v.len() <= 32 && v.bytes().all(|b| b.is_ascii_alphabetic())
     };
     if ok {
         v.to_string()
@@ -1742,14 +1767,34 @@ mod tests {
     fn committing_where_you_already_are_is_just_a_hide() {
         // The panel opened on "1", nothing hovered, nothing scrolled: Enter (or
         // a click on row 1) has nowhere to switch to.
-        assert!(commit_is_a_plain_hide(Some("1"), Some("1"), Some("1"), false));
+        assert!(commit_is_a_plain_hide(
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            false
+        ));
         // Origin "1", a preview took sway to "2": committing "2" is real…
-        assert!(!commit_is_a_plain_hide(Some("2"), Some("2"), Some("1"), false));
+        assert!(!commit_is_a_plain_hide(
+            Some("2"),
+            Some("2"),
+            Some("1"),
+            false
+        ));
         // …and so is coming back to "1" — that switch is how you come back.
-        assert!(!commit_is_a_plain_hide(Some("1"), Some("2"), Some("1"), false));
+        assert!(!commit_is_a_plain_hide(
+            Some("1"),
+            Some("2"),
+            Some("1"),
+            false
+        ));
         // A preview still waiting out its debounce means sway has not been
         // asked yet, so even a commit of the origin has to ask.
-        assert!(!commit_is_a_plain_hide(Some("1"), Some("1"), Some("1"), true));
+        assert!(!commit_is_a_plain_hide(
+            Some("1"),
+            Some("1"),
+            Some("1"),
+            true
+        ));
         // Nothing selected at all (no rows, no origin): nothing to switch to,
         // but `commit` logs that case separately — the rule must not claim it.
         assert!(!commit_is_a_plain_hide(None, None, None, false));

@@ -278,7 +278,11 @@ fn main() {
             // INJECT_NO_MOTION=1 skips the motion: the wheel then lands
             // wherever sway's cursor already is, which is how a real user
             // scrolls without moving the mouse first.
-            let motions = if std::env::var_os("INJECT_NO_MOTION").is_some() { 0 } else { 6 };
+            let motions = if std::env::var_os("INJECT_NO_MOTION").is_some() {
+                0
+            } else {
+                6
+            };
             for i in 0..motions {
                 ptr.motion_absolute(now(), x + (i % 2), y, 1280, 720);
                 ptr.frame();
@@ -288,11 +292,19 @@ fn main() {
 
             if click && !scrolling {
                 const BTN_LEFT: u32 = 0x110;
-                ptr.button(now(), BTN_LEFT, wayland_client::protocol::wl_pointer::ButtonState::Pressed);
+                ptr.button(
+                    now(),
+                    BTN_LEFT,
+                    wayland_client::protocol::wl_pointer::ButtonState::Pressed,
+                );
                 ptr.frame();
                 conn.flush().unwrap();
                 std::thread::sleep(std::time::Duration::from_millis(120));
-                ptr.button(now(), BTN_LEFT, wayland_client::protocol::wl_pointer::ButtonState::Released);
+                ptr.button(
+                    now(),
+                    BTN_LEFT,
+                    wayland_client::protocol::wl_pointer::ButtonState::Released,
+                );
                 ptr.frame();
                 conn.flush().unwrap();
             }
@@ -480,4 +492,3 @@ fn tempfile() -> std::fs::File {
     let _ = std::fs::remove_file(&path);
     f
 }
-

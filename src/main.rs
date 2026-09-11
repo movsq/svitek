@@ -252,7 +252,11 @@ fn activate(
                     st.shown_on = None;
                     let previewing = std::mem::take(&mut st.previewing);
                     let origin = st.preview_origin.take();
-                    let revert = if previewing && !committed { origin } else { None };
+                    let revert = if previewing && !committed {
+                        origin
+                    } else {
+                        None
+                    };
                     (st.pending_show.take(), revert)
                 };
                 if let Some(p) = pending {
@@ -827,7 +831,8 @@ fn install_signal_handlers(tx: Sender<Msg>) {
             let mut buf = [0u8; 1];
             let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
             if n <= 0 {
-                if n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                if n < 0
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
                 {
                     continue;
                 }

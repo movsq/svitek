@@ -238,12 +238,7 @@ fn build_snapshot(workspaces: &[Workspace], tree: &Node, outputs: &[Output]) -> 
         .iter()
         .find(|o| o.focused)
         .map(|o| o.name.clone())
-        .or_else(|| {
-            infos
-                .iter()
-                .find(|w| w.focused)
-                .map(|w| w.output.clone())
-        })
+        .or_else(|| infos.iter().find(|w| w.focused).map(|w| w.output.clone()))
         .or_else(|| outputs.first().map(|o| o.name.clone()))
         .unwrap_or_default();
 
@@ -578,7 +573,10 @@ mod tests {
             .map(|w| w.title.as_str())
             .collect();
         assert_eq!(focused_windows, vec!["one-floating"]);
-        assert_eq!(s.visible_on("HEADLESS-2").map(|w| w.name.as_str()), Some("3"));
+        assert_eq!(
+            s.visible_on("HEADLESS-2").map(|w| w.name.as_str()),
+            Some("3")
+        );
     }
 
     #[test]
