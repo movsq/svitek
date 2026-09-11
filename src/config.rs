@@ -5,8 +5,14 @@
 //! ```toml
 //! # Width of the thumbnails in pixels; height follows the output's aspect ratio.
 //! thumbnail_width = 240
-//! # Which screen edge the panel is anchored to: "left" (default) or "right".
-//! position = "left"
+//! # Where the panel sits: "center" (default) lays the workspaces out side by
+//! # side in the middle of the screen; "left" / "right" stack them in a
+//! # full-height column along that edge.
+//! position = "center"
+//! # Close the panel as soon as a workspace is clicked (default). With `false`
+//! # a click switches to the workspace but leaves the panel open, so several
+//! # can be visited in a row; Enter always closes.
+//! close_on_select = true
 //!
 //! [colors]
 //! background = "#1e1e2ecc"   # panel background (RGBA hex allowed)
@@ -23,6 +29,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub thumbnail_width: u32,
     pub position: Position,
+    pub close_on_select: bool,
     pub colors: Colors,
 }
 
@@ -30,6 +37,7 @@ pub struct Config {
 #[serde(rename_all = "lowercase")]
 pub enum Position {
     Left,
+    Center,
     Right,
 }
 
@@ -44,7 +52,12 @@ pub struct Colors {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { thumbnail_width: 240, position: Position::Left, colors: Colors::default() }
+        Config {
+            thumbnail_width: 240,
+            position: Position::Center,
+            close_on_select: true,
+            colors: Colors::default(),
+        }
     }
 }
 
@@ -93,7 +106,18 @@ mod tests {
         assert_eq!(c.thumbnail_width, 320);
         assert_eq!(c.colors.focused, "#fff");
         assert_eq!(c.colors.dim, Colors::default().dim);
+        assert_eq!(c.position, Position::Center);
+        assert!(c.close_on_select);
+    }
+
+    #[test]
+    fn position_and_close_on_select_parse() {
+        let c: Config = toml::from_str("position = \"left\"\nclose_on_select = false\n").unwrap();
         assert_eq!(c.position, Position::Left);
+        assert!(!c.close_on_select);
+        let c: Config = toml::from_str("position = \"right\"\n").unwrap();
+        assert_eq!(c.position, Position::Right);
+        assert!(toml::from_str::<Config>("position = \"top\"\n").is_err());
     }
 
     #[test]

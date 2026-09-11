@@ -186,8 +186,18 @@ fn activate(
             Box::new(move |name: &str, num| {
                 debug!("switching to workspace {name:?} (num {num:?})");
                 {
-                    // A click while the panel is up makes this the origin:
-                    // closing later must not revert to where the panel opened.
+                    // Only reached with the panel still up when a click did
+                    // *not* close it (`close_on_select = false`): that click
+                    // makes this workspace the origin, so closing later must
+                    // not revert to where the panel opened.
+                    //
+                    // A committing switch — Enter, or a click with the default
+                    // `close_on_select` — arrives after `hidden` has already
+                    // run and cleared `shown_on` (ui.rs hides first, switches
+                    // second, in one straight line on the GTK thread). So this
+                    // block is correctly skipped there: `preview_origin` must
+                    // stay `None` while the panel is down, and the revert has
+                    // already been suppressed by `committed`.
                     let mut st = state.borrow_mut();
                     if st.shown_on.is_some() {
                         st.preview_origin = Some(name.to_string());

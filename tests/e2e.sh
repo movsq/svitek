@@ -58,40 +58,89 @@ wait_log() {
   done
   fail "timed out waiting for log line /$1/"; return 1
 }
-panel_visible() { # "yes" when the focused-row border is on screen
-  grim -o HEADLESS-1 "$SVITEK_TEST_DIR/probe.png"
+# "yes" when the focused row/card marker (the border, #89b4fa) shows up in the
+# vertical slice x0 <= x < x1 of a screenshot — that colour appears nowhere else
+# on screen, so it is how we see both *that* the panel is up and *where*.
+focus_marker_in() { # focus_marker_in <png> <x0> <x1>
   if [ "$HAVE_PIL" = 1 ]; then
     python3 -c "
 from PIL import Image
-px=list(Image.open('$SVITEK_TEST_DIR/probe.png').convert('RGB').crop((0,0,$PANEL_W,720)).get_flattened_data())
+px=list(Image.open('$1').convert('RGB').crop(($2,0,$3,720)).get_flattened_data())
 print('yes' if sum(1 for r,g,b in px if b>200 and 100<r<190 and g>150)>500 else 'no')"
   else
-    n=$(magick "$SVITEK_TEST_DIR/probe.png" -crop "${PANEL_W}x720+0+0" +repage \
+    n=$(magick "$1" -crop "$(($3 - $2))x720+$2+0" +repage \
           -fill black -fuzz 12% +opaque '#89b4fa' -fill white -opaque '#89b4fa' \
           -colorspace gray -format '%[fx:int(mean*100000)]' info:)
     [ "$n" -gt 100 ] && echo yes || echo no
   fi
+}
+panel_visible() { # "yes" when the focused-row border is on screen
+  grim -o HEADLESS-1 "$SVITEK_TEST_DIR/probe.png"
+  focus_marker_in "$SVITEK_TEST_DIR/probe.png" 0 "$PANEL_W"
+}
+# The name of the workspace sway has focused right now. Shell only (the
+# ImageMagick path of this script must work without python3): every workspace
+# object in `get_workspaces` prints its "name" before its "focused".
+focused_ws() {
+  swaymsg -t get_workspaces |
+    grep -oE '"name": "[^"]*"|"focused": (true|false)' |
+    awk -F'"' '/"name"/ { n = $4 } /focused/ { if ($0 ~ /true/) { print n; exit } }'
 }
 foot_on() { # foot_on <workspace> <title> [script-to-run-in-it]
   swaymsg "workspace $1" >/dev/null
   swaymsg exec "foot -T $2 -e sh ${3:-$SVITEK_TEST_DIR/idle.sh}" >/dev/null
   sleep 1.2
 }
+# Start the daemon and wait until it has sway's state. Each run gets its own log
+# (so `wait_log` after a restart cannot match a line from the previous daemon,
+# and the log check at the end still sees every run). The config file must
+# already be written: svitek reads it once, at startup.
+start_daemon() {
+  DAEMON_RUNS=$((DAEMON_RUNS + 1))
+  LOG="$SVITEK_TEST_DIR/svitek-$DAEMON_RUNS.log"
+  RUST_LOG=svitek=debug setsid $SVITEK >"$LOG" 2>&1 &
+  DAEMON_PID=$!
+  DAEMON_STARTED=1
+  wait_log 'listening on' || return 1
+  wait_log 'initial snapshot' || return 1
+}
 
-PANEL_W=546   # default config: 240 thumb + 260 text + 46 chrome
+# write_config <extra lines…>: the daemon reads this once, at startup. Every
+# pixel probe up to the "centered layout" step measures the left edge of the
+# output, so the column layout is pinned here rather than following the default.
+write_config() {
+  { echo 'position = "left"'; [ $# -gt 0 ] && printf '%s\n' "$@"; } \
+    > "$XDG_CONFIG_HOME/svitek/config.toml"
+}
+
+PANEL_W=546   # `position = "left"`: 240 thumb + 260 text + 46 chrome
+DAEMON_RUNS=0
+# Where a row is, with `position = "left"` and the default 240 px thumbnails on
+# the 1280x720 headless output: the list pads 8 px, and a row is 135 px of
+# thumbnail (240 * 9/16) + 8 px padding + 2 px border top and bottom = 155 px,
+# with 6 px between rows. So row 1 spans y 8..163 and row 2 y 169..324; click
+# their centres. (Read off a grim screenshot of the panel, not just computed.)
+ROW_X=270
+ROW1_Y=85
+ROW2_Y=246
 HAVE_PIL=0; python3 -c 'import PIL' 2>/dev/null && HAVE_PIL=1
 [ "$HAVE_PIL" = 1 ] || command -v magick >/dev/null || { echo "need python3+PIL or ImageMagick"; exit 2; }
 
 step "build"
 cargo build --release || exit 2
+# The input injector is a separate, test-only crate (see tools/inject/src/main.rs);
+# `cargo build` in the root deliberately does not build it.
+[ -x ./target/release/inject ] || CARGO_TARGET_DIR=$PWD/target \
+  cargo build --release --manifest-path tools/inject/Cargo.toml || exit 2
+INJECT=./target/release/inject
 
 step "headless sway"
-rm -rf "$SVITEK_TEST_DIR"; mkdir -p "$SVITEK_TEST_DIR/cfg"
+rm -rf "$SVITEK_TEST_DIR"; mkdir -p "$SVITEK_TEST_DIR/cfg/svitek"
 eval "$(tests/headless-sway.sh start)" || exit 2
 unset I3SOCK
-export XDG_CONFIG_HOME="$SVITEK_TEST_DIR/cfg"     # defaults, whatever the user has
+export XDG_CONFIG_HOME="$SVITEK_TEST_DIR/cfg"     # our own config, whatever the user has
 export SVITEK_SOCKET="$SVITEK_TEST_DIR/svitek.sock"
-LOG="$SVITEK_TEST_DIR/svitek.log"
+write_config
 
 echo 'sleep 4000' > "$SVITEK_TEST_DIR/idle.sh"
 # Fills its whole terminal with green cells: a workspace change a thumbnail
@@ -106,11 +155,7 @@ step "client without a daemon"
 $SVITEK toggle >/dev/null 2>&1; check "$?" 1 "toggle exits 1 when nothing is running"
 
 step "daemon"
-RUST_LOG=svitek=debug setsid $SVITEK >"$LOG" 2>&1 &
-DAEMON_PID=$!
-DAEMON_STARTED=1
-wait_log 'listening on' || exit 1
-wait_log 'initial snapshot' || exit 1
+start_daemon || exit 1
 foot_on 1 ALPHA
 foot_on 2 BRAVO
 swaymsg workspace 1 >/dev/null; sleep 1
@@ -145,6 +190,67 @@ if [ "$G" -ge 5 ]; then pass "workspace 2's row shows the CHANGED content (${G}%
 else fail "workspace 2's thumbnail is stale: only ${G}% green (see $SVITEK_TEST_DIR/after.png)"; fi
 $SVITEK hide; sleep 0.4
 
+step "click selects a workspace"
+# (a) close_on_select defaults to true: clicking a row is Enter for that row —
+# the panel closes and sway is left on it. (The injector's pointer motion also
+# arms a hover preview of that row on the way in; the click has to win over it,
+# which is the interesting half of this check.)
+swaymsg workspace 1 >/dev/null; sleep 0.6
+$SVITEK show; sleep 0.8
+check "$(panel_visible)" yes "the panel is up before the click"
+$INJECT pointer HEADLESS-1 $ROW_X $ROW2_Y click >/dev/null
+sleep 1
+check "$(panel_visible)" no "a click on workspace 2's row closes the panel"
+check "$(focused_ws)" 2 "the click leaves sway on workspace 2"
+if grep -q 'click commits workspace "2"' "$LOG"; then pass "the daemon logged the commit"
+else fail "no 'click commits workspace \"2\"' in $LOG"; fi
+
+# (b) close_on_select = false: the click switches and the panel stays up. The
+# config is only read at startup, so the daemon has to be restarted for it.
+$SVITEK quit; sleep 1
+write_config 'close_on_select = false'
+start_daemon || exit 1
+swaymsg workspace 2 >/dev/null; sleep 0.8
+$SVITEK show; sleep 0.8
+$INJECT pointer HEADLESS-1 $ROW_X $ROW1_Y click >/dev/null
+sleep 1
+check "$(panel_visible)" yes "close_on_select = false keeps the panel open"
+check "$(focused_ws)" 1 "the click still switches to workspace 1"
+$SVITEK hide; sleep 0.5
+check "$(panel_visible)" no "hide closes it"
+
+step "centered layout"
+# The default `position` is "center": a horizontal strip of cards floating in
+# the middle of the output, not a column on an edge. The config is read once at
+# startup, so this needs a fresh daemon (which also starts with an empty
+# thumbnail cache — the cards show the "no preview yet" placeholder, and the
+# focus marker is what we are probing for anyway).
+$SVITEK quit; sleep 1
+DAEMON_STARTED=
+: > "$XDG_CONFIG_HOME/svitek/config.toml"        # no keys at all => the defaults
+start_daemon || exit 1
+swaymsg workspace 1 >/dev/null; sleep 1.2
+$SVITEK toggle; wait_log 'panel shown on HEADLESS-1'; sleep 0.7
+grim -o HEADLESS-1 "$SVITEK_TEST_DIR/center.png"
+check "$(focus_marker_in "$SVITEK_TEST_DIR/center.png" 427 853)" yes \
+      "the focused card is in the middle third of the output"
+check "$(focus_marker_in "$SVITEK_TEST_DIR/center.png" 0 200)" no \
+      "nothing of the strip reaches the left edge"
+
+# A click on the scrim — well clear of the strip, which is centred vertically —
+# still dismisses the panel in this layout.
+$INJECT pointer HEADLESS-1 40 40 click >/dev/null 2>&1; sleep 0.7
+check "$(panel_visible)" no "a click outside the strip hides it"
+
+# One wheel detent moves the selection one card to the *right*, i.e. to the next
+# workspace, and previews it for real; hiding then puts us back on the origin.
+check "$(focused_ws)" 1 "the origin workspace before the wheel"
+$SVITEK toggle; wait_log 'panel shown on HEADLESS-1'; sleep 0.7
+$INJECT scroll HEADLESS-1 640 360 1 >/dev/null 2>&1; sleep 0.9
+check "$(focused_ws)" 2 "a wheel step down previews the card to the right"
+$SVITEK hide; sleep 0.7
+check "$(focused_ws)" 1 "hiding reverts to the origin workspace"
+
 step "quit"
 $SVITEK quit; sleep 1
 # Only *our* daemon: the developer may well have their own svitek running.
@@ -155,7 +261,8 @@ kill -0 "$DAEMON_PID" 2>/dev/null && fail "test daemon (pid $DAEMON_PID) is stil
 DAEMON_STARTED=
 
 step "daemon log"
-if grep -E '(WARN|ERROR) +svitek' "$LOG"; then fail "svitek logged warnings/errors (above)"
+if grep -E '(WARN|ERROR) +svitek' "$SVITEK_TEST_DIR"/svitek-*.log; then
+  fail "svitek logged warnings/errors (above)"
 else pass "no svitek warnings or errors"; fi
 
 exit "$FAILED"

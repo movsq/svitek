@@ -27,9 +27,35 @@ except `ui.rs` and `main.rs` free of GTK.
 
 One layer-shell surface, Overlay, exclusive zone 0, keyboard mode Exclusive,
 anchored to **all four edges** of the output the panel is shown on — so it is
-the size of that output. The panel proper is a fixed-width frame inside it
-(thumbnail width + text column + chrome), pinned to the edge `position` names
-and full height; the rest is an invisible scrim.
+the size of that output. The panel proper is a frame inside it; the rest is an
+invisible scrim.
+
+The frame has two shapes, and `config.position` picks one at startup (it is read
+once). Both are the same `ScrolledWindow` with the same `.panel` background, the
+same rows, and the same hit test — only the axis changes:
+
+| | `center` (default) | `left` / `right` |
+|---|---|---|
+| frame | strip of cards, `halign`/`valign` Center | column, full height, at that edge |
+| row | thumbnail over ≤ 3 window lines | thumbnail beside ≤ 6 window lines |
+| width | its cards, capped at the output | fixed: thumb + text column + chrome |
+| scrolls | horizontally (vscrollbar Never) | vertically (hscrollbar Never) |
+
+Why centered by default: a switcher is looked at, not lived in, and the middle
+of the screen is where the eyes already are. Cards also keep every thumbnail the
+same size however many workspaces there are, where a column has to choose
+between a taller panel and smaller pictures.
+
+The cap is the interesting part. The strip asks for its natural width
+(`propagate_natural_width`), which is `strip_width()` — cards, gaps, padding —
+and that can easily exceed the output: nine 240 px cards want 2500 px on a
+1280 px screen. Because `halign` is Center rather than Fill, GTK's
+`adjust_for_align` allocates `MIN(natural, available)`, so the strip stops at
+the output's width and its horizontal scrollbar takes over; nothing overflows
+and nothing is clipped. A card, in turn, is exactly `card_width()` = thumbnail +
+padding + border, and the window lines under it cannot widen it: their labels
+ellipsize and their `max-width-chars` caps their *natural* width, so the line
+asks for less than the card is worth and takes what the card has.
 
 The scrim is not decoration: it is how a click outside the panel closes it. The
 click lands on our surface, `pressed` hit-tests it against the frame's bounds
@@ -91,22 +117,31 @@ covering is the one that just became visible.
 * **One selection, two ways to move it.** `Panel::previewed` is not just
   bookkeeping for the hover debounce, it *is* the selection: the row the panel
   is currently showing. It starts on the origin at `show()`, the pointer moves
-  it by hovering, and the wheel moves it by rows — one step per detent, down
-  the list for wheel-down, **clamped** at both ends rather than wrapping (a
-  spin must never take the user somewhere they were not aiming for). A step
-  counts from the pending preview if one is waiting out its debounce, else from
-  `previewed`, so hover and wheel can never disagree: whichever acted last is
-  what the next step moves from, and four quick steps land four rows away
-  instead of one.
+  it by hovering, and the wheel moves it by rows — one step per detent, **down
+  the list** for wheel-down in a column and **one card to the right** in the
+  centered strip (the same `clamp_step` either way: the cards run left to right
+  in the order the rows run top to bottom), **clamped** at both ends rather than
+  wrapping (a spin must never take the user somewhere they were not aiming for).
+  A step counts from the pending preview if one is waiting out its debounce,
+  else from `previewed`, so hover and wheel can never disagree: whichever acted
+  last is what the next step moves from, and four quick steps land four rows
+  away instead of one.
 * **The wheel controller is on the window, in the CAPTURE phase, and always
   claims the event.** A step on the scrim has to work (the scrim is the window's
   child, so a window-level controller covers the whole surface), and the
   `ScrolledWindow` inside must *not* also scroll the list — the selection moving
   is the scroll. `ui.rs` scrolls the selected row into view itself instead
-  (`scroll_into_view`, shared with the focused row at `show()`). The controller
-  takes `VERTICAL` without `DISCRETE` and accumulates the raw deltas, so a mouse
+  (`scroll_into_view`, shared with the focused row at `show()`; it moves the
+  horizontal adjustment in the centered layout and the vertical one in the
+  columns, over the same arithmetic in `scroll_target`). The controller takes
+  `VERTICAL` without `DISCRETE` and accumulates the raw deltas, so a mouse
   wheel (±1.0 per detent) and a touchpad (fractions) both come out as whole rows
-  (`wheel_steps`, `clamp_step` — the two pure functions the unit tests cover).
+  (`wheel_steps`, `clamp_step` — the pure functions the unit tests cover).
+  `VERTICAL` in the centered layout too, where the selection moves sideways:
+  most wheels only *have* a vertical axis, and "down is the next workspace" is
+  then one gesture in both layouts. Adding `HORIZONTAL` would mean summing two
+  axes and double-counting a diagonal touchpad swipe, for a gesture no mouse can
+  make.
 * **One debounce for both.** Hover and wheel share `PREVIEW_DEBOUNCE` (120 ms)
   and one `Panel::pending`, so spinning the wheel through five rows is one
   workspace switch, fired 120 ms after the *last* step, not five on the way.
@@ -118,17 +153,28 @@ covering is the one that just became visible.
   moves again.
 * **Closing reverts.** Esc, a click outside, `svitek hide|toggle` — the panel
   hides and, if `previewing`, switches back to the origin. Looking around is
-  free; the only way to *end up* somewhere is to commit. A **click on a row**
-  switches there and makes it the new origin while the panel stays open (the
-  `.focused` marker moves, the selection restarts from it, and closing later
-  stays there). **Enter** takes the current selection and closes; it sets `Panel::committed`
-  before `hide()` so the `hidden` callback knows not to revert, and both then
-  call `callbacks.switch`. (Enter with the selection still on the origin and
-  nothing previewed has nothing to switch to, so it is a plain hide.) Setting a
-  flag and reading it inside `hide()` is what makes it race-free: `hidden` fires
-  from inside `hide()`, on the GTK thread, in one straight line. Enter is
-  handled by the same CAPTURE-phase key controller as Esc, for the same reason:
-  a focused child must not get to swallow it first.
+  free; the only way to *end up* somewhere is to commit. **Enter** commits the
+  current selection, and so — by default — does a **click on a row**, of that
+  row: picking a workspace is what the panel is for, so the gesture that picks
+  one also closes it. Both go through `Panel::commit`, which sets
+  `Panel::committed`, calls `hide()`, and only then calls `callbacks.switch`.
+  Setting a flag and reading it inside `hide()` is what makes that race-free:
+  `hidden` fires from inside `hide()`, on the GTK thread, in one straight line —
+  and the order matters the other way round too, because `main.rs` keys "a click
+  adopted a new origin" off `shown_on`, which `hidden` has already cleared by
+  the time `switch` runs. Committing where you already are is a plain hide
+  (`commit_is_a_plain_hide`: the target is the origin, nothing is previewed
+  away from it, and no debounce is in flight — a unit-tested pure function, so
+  Enter and the click cannot drift apart). Enter is handled by the same
+  CAPTURE-phase key controller as Esc, for the same reason: a focused child must
+  not get to swallow it first.
+* **`close_on_select = false` is the other reading of a click.** Some people use
+  the panel as a place to walk through workspaces rather than a menu to pick one
+  from, so the old behaviour is a config key, not a deleted branch: the click
+  switches, `adopt_origin` makes that row the new origin (the `.focused` marker
+  moves, the selection restarts from it, closing later stays there), and the
+  panel stays up. Enter closes either way — there has to be one gesture that
+  always means "this one, done".
 * **Leaving a row is not closing.** Moving onto the padding or the scrim only
   cancels a pending debounce. A preview stands until the panel closes, so the
   pointer can go anywhere — including out of the panel to look at the workspace

@@ -1,42 +1,53 @@
 # svitek
 
 svitek (Czech: scroll) is a workspace switcher panel for [sway](https://swaywm.org):
-one resident process that pops a panel over the left edge of the focused output,
-listing that output's workspaces with a thumbnail and the window titles of each.
+one resident process that pops a strip of workspace cards over the middle of the
+focused output, each card a thumbnail of that workspace and the window titles on
+it.
 
 ## What it does
 
-* `Mod+A` toggles the panel. It appears on the left edge of the output that has
-  focus, and lists the workspaces of that output only.
-* Every row shows the workspace name/number, a thumbnail of that workspace, and
-  the titles of the windows on it. The focused workspace is marked.
-* **Rest the pointer on a row and that workspace appears live behind the
+* `Mod+A` toggles the panel. It appears in the middle of the output that has
+  focus, and lists the workspaces of that output only — one card per workspace,
+  side by side, `[ws1] [ws2] [ws3]`, where the eyes already are. If there are
+  more workspaces than fit across the screen the strip scrolls sideways rather
+  than shrinking the thumbnails. Set `position = "left"` (or `"right"`) in the
+  config for the alternative: a full-height column pinned to that edge, one row
+  per workspace, with room for more window titles beside each thumbnail.
+* Every card (or row) shows the workspace name/number, a thumbnail of that
+  workspace, and the titles of the windows on it — three of them on a card, six
+  in a column row, then "+N more". The focused workspace is marked.
+* **Rest the pointer on a card and that workspace appears live behind the
   panel.** After about a tenth of a second svitek switches to it and leaves the
   panel up on top, so you are looking at the real workspace, not a thumbnail —
-  moving, up to date, with everything on it. Move to another row and it follows;
-  move back to the row you started on and you are back where you were.
+  moving, up to date, with everything on it. Move to another card and it
+  follows; move back to the one you started on and you are back where you were.
 * **The scroll wheel does the same thing without the pointer.** A wheel step
-  anywhere on the screen while the panel is up — a row, the panel itself, or
-  the empty space beside it — moves the selection one workspace down (wheel
-  down) or up, and previews it exactly like hovering does. It stops at the
-  first and last workspace instead of wrapping, and it follows the pointer:
-  scroll after hovering a row and the next step counts from *that* row. Spin it
-  through five workspaces and svitek switches once, when you stop, not five
-  times on the way; if the list is longer than the screen it scrolls to keep
+  anywhere on the screen while the panel is up — a card, the panel itself, or
+  the empty space around it — moves the selection one workspace along (wheel
+  down: to the right in the centered strip, down the list in a column) and
+  previews it exactly like hovering does. It stops at the first and last
+  workspace instead of wrapping, and it follows the pointer: scroll after
+  hovering a card and the next step counts from *that* one. Spin it through
+  five workspaces and svitek switches once, when you stop, not five times on
+  the way; if the strip or list is bigger than the screen it scrolls to keep
   the selection in view.
-* Click a row to make that workspace the active one. The panel stays open,
-  the focus marker moves to that row, and previews now start from there.
-  Press `Enter` to take the workspace you have selected with the wheel (or are
-  hovering) and close the panel in one go. `Esc`, `Mod+A` again, or a click
-  anywhere outside the panel hides it and **puts you back on the active
-  workspace** — the one you opened it from, or the last one you clicked —
-  whatever you previewed in between. So looking around costs nothing, and the
-  only way to end up somewhere new is to click a row or press `Enter`. That
-  closing click is swallowed: svitek's surface covers the whole
-  output, so dismissing the panel never also clicks the window behind it. The
-  catch on a multi-output setup is that the surface covers only the output the
-  panel is on — a click on another screen does not close the panel (it does move
-  sway's focus there); `Esc` and `Mod+A` work from anywhere.
+* **Click a workspace to go to that workspace: the panel closes and you are there.**
+  That is what picking one means, so the click that picks it also puts the panel
+  away. `Enter` does the same for the workspace you have selected with the wheel
+  (or are hovering). If you would rather use the panel to walk through several
+  workspaces in one showing, set `close_on_select = false`: a click then switches
+  but leaves the panel up, the focus marker moves to that card or row, and previews start
+  from there — `Enter` still closes. `Esc`, `Mod+A` again, or a click anywhere
+  outside the panel hides it and **puts you back on the active workspace** — the
+  one you opened it from, or, with `close_on_select = false`, the last one you
+  clicked — whatever you previewed in between. So looking around costs nothing,
+  and the only way to end up somewhere new is to click a workspace or press `Enter`.
+  That dismissing click is swallowed: svitek's surface covers the whole output,
+  so closing the panel never also clicks the window behind it. The catch on a
+  multi-output setup is that the surface covers only the output the panel is on
+  — a click on another screen does not close the panel (it does move sway's
+  focus there); `Esc` and `Mod+A` work from anywhere.
 * A preview is a **real workspace switch** — sway renders only the workspace it
   is showing, so there is no other way to see one live. That means sway fires
   its usual `workspace` events for every preview, and anything watching them
@@ -130,16 +141,22 @@ reported on stderr at start and the defaults are used.
 
 ```toml
 # Width of the thumbnails in pixels; height follows the output's aspect ratio.
+# In the centered layout this is also the width of a card.
 thumbnail_width = 240
-# Which screen edge the panel is anchored to: "left" (default) or "right".
-position = "left"
+# Where the panel sits: "center" (default) is a horizontal strip of cards in the
+# middle of the output; "left" and "right" are a full-height column pinned to
+# that edge.
+position = "center"
+# Close the panel as soon as a workspace is clicked (default); `false` switches
+# but leaves it open, so several workspaces can be visited. Enter always closes.
+close_on_select = true
 
 [colors]
 background = "#1e1e2ecc"   # panel background (RGBA hex allowed)
 foreground = "#cdd6f4"     # window titles
 dim        = "#a6adc8"     # app_id, workspace labels
-focused    = "#89b4fa"     # border/marker of the focused workspace row
-                           # (the row being previewed gets the same colour at 60 %)
+focused    = "#89b4fa"     # border/marker of the focused workspace card
+                           # (the one being previewed gets the same colour at 60 %)
 ```
 
 ## Environment
@@ -169,8 +186,11 @@ Use `SVITEK_TEST_DIR` to keep parallel headless instances apart. The unit tests
 (`cargo test`) need no compositor at all.
 
 `tests/e2e.sh` does the whole thing unattended — headless sway, build, daemon,
-toggle/show/hide/quit and the 1 → 2 → back-to-1 thumbnail check (a pixel test on
-the preview) — and exits non-zero if anything fails. It needs `foot`, `grim` and
+toggle/show/hide/quit, the 1 → 2 → back-to-1 thumbnail check (a pixel test on
+the preview), a click on a row in both `close_on_select` modes and, with the
+daemon restarted on the default config, the centered strip (where its focus
+marker lands on screen, a click outside it, a wheel step to the next card) — and
+exits non-zero if anything fails. It needs `foot`, `grim` and
 either python3 + PIL or ImageMagick. `tools/inject/` is a separate test-only
 crate that fakes pointer motion, clicks, wheel steps and key presses on the
 headless seat, which has no input devices; see the comment at the top of

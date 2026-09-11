@@ -3,31 +3,54 @@
 //! toggle well under 100 ms.
 //!
 //! The layer surface covers the *whole* output (all four edges anchored,
-//! exclusive zone 0), not just the panel: the panel proper is a fixed-width
-//! frame inside it, pinned to the configured edge and full height, and the rest
-//! of the surface is a scrim that is invisible but not empty. That is what lets
-//! a click outside the panel close it — the click lands on our own surface,
-//! where we hit-test it against the frame, and it goes no further; a surface
-//! only as wide as the panel would hand that click to whatever is underneath,
-//! and clicking a window to dismiss the panel would also click that window.
+//! exclusive zone 0), not just the panel: the panel proper is a frame inside
+//! it, and the rest of the surface is a scrim that is invisible but not empty.
+//! That is what lets a click outside the panel close it — the click lands on
+//! our own surface, where we hit-test it against the frame, and it goes no
+//! further; a surface only as wide as the panel would hand that click to
+//! whatever is underneath, and clicking a window to dismiss the panel would
+//! also click that window.
 //!
-//! Hovering a row previews that workspace, which — because sway only renders
-//! the workspace it is showing — means really switching to it and leaving the
-//! panel up on top. The wheel does the same thing without the pointer: a step
-//! moves the *selection* one row down or up (clamped, no wrap) and previews it.
+//! The frame comes in two shapes, chosen by `config.position`, and everything
+//! else in this module is written once for both:
+//!
+//! * **`center` (the default)** — a horizontal strip of *cards* floating in the
+//!   middle of the output, one per workspace, side by side: thumbnail on top,
+//!   up to three window lines under it. It is as wide as its cards and no
+//!   wider than the output, so with more workspaces than fit it scrolls
+//!   horizontally instead of being clipped. This is the layout that puts the
+//!   workspaces where the eyes already are and keeps every thumbnail the same
+//!   size however many there are.
+//! * **`left` / `right`** — the original fixed-width, full-height column
+//!   pinned to that edge, one row per workspace (thumbnail beside up to six
+//!   window lines), scrolling vertically.
+//!
+//! Hovering a row (or a card — `Row` is the widget bundle either way) previews
+//! that workspace, which — because sway only renders the workspace it is
+//! showing — means really switching to it and leaving the panel up on top. The
+//! wheel does the same thing without the pointer: a step moves the *selection*
+//! one row down/up in the column layouts, one card right/left in the centered
+//! one (clamped, no wrap), and previews it.
 //! Hover and wheel share one notion of "what is being previewed right now"
 //! (`Panel::previewed` plus the pending debounce), so whichever acted last is
 //! where the next wheel step counts from. The rules live in two halves: this
 //! module decides *when* (a 120 ms debounce, armed only by a real pointer
 //! motion after `show()`, or by a wheel step) and `main.rs` decides *what*
 //! (whether a switch is needed, and undoing it unless the user committed).
-//! Enter commits the selection the way a click commits a row. While the panel
+//! Enter always commits the selection: it marks the hide as a commit (so the
+//! preview is not reverted) and switches. A click on a row does the same thing
+//! by default — selecting a workspace is what the panel is for, so the click
+//! that picks one also closes it — but `close_on_select = false` turns a click
+//! into "go there and stay open" instead: the clicked row becomes the new
+//! origin, previews measure from it, and several workspaces can be visited in
+//! one showing. Both paths go through `Panel::commit`/`commit_is_a_plain_hide`,
+//! so there is exactly one definition of what committing means. While the panel
 //! is visible the rows are frozen: a focus change repaints CSS classes and
 //! never rebuilds, because rebuilding would destroy the row under the pointer
 //! and re-enter it.
 
 use crate::config::{Colors, Config, Position};
-use crate::model::{flags_only_change, Snapshot, Thumbnail, WorkspaceInfo};
+use crate::model::{flags_only_change, Snapshot, Thumbnail, WindowInfo, WorkspaceInfo};
 
 use gtk4::gdk;
 use gtk4::glib;
@@ -47,6 +70,25 @@ const TEXT_COLUMN_WIDTH: i32 = 260;
 const CHROME_WIDTH: i32 = 8 * 2 + 2 * 2 + 10 + 8 * 2;
 /// How many window lines a row shows before collapsing into "+N more".
 const MAX_WINDOW_LINES: usize = 6;
+/// The same, for a *card* in the centered strip. Cards stand side by side, so
+/// height is the scarce dimension there — and every card is as tall as the
+/// tallest, so one busy workspace would otherwise stretch the whole strip.
+/// Three lines is what keeps a card roughly as tall as it is wide.
+const MAX_CARD_LINES: usize = 3;
+/// Padding and border of a row/card, in px. The stylesheet is generated from
+/// these, so `card_width` below and the CSS cannot drift apart.
+const ROW_PADDING: i32 = 8;
+const ROW_BORDER: i32 = 2;
+/// Horizontal chrome around a card's thumbnail: padding and border, both sides.
+/// A card is exactly as wide as its thumbnail plus this, and never wider: the
+/// window lines under the thumbnail ellipsize instead of pushing it out (their
+/// *natural* width is capped, see `window_line`).
+const CARD_CHROME_WIDTH: i32 = 2 * (ROW_PADDING + ROW_BORDER);
+/// Gap between two cards in the strip.
+const CARD_SPACING: i32 = 10;
+/// Padding between the strip's rounded background and the outermost cards.
+/// Same 8 px as the column's `.ws-list`, so both frames breathe alike.
+const STRIP_PADDING: i32 = 8;
 /// Background of the part of the surface that is not the panel (the frame
 /// paints its own on top). The scrim has to be invisible — the workspace under
 /// it must look untouched, pixel for pixel — but it still has to *catch* the
@@ -75,9 +117,14 @@ pub type WorkspaceFn = Box<dyn Fn(&str, Option<i32>)>;
 
 /// What the panel asks the app to do.
 pub struct PanelCallbacks {
-    /// Switch to workspace (name, num) for good. Called on a row click (the
-    /// panel stays open and that workspace becomes its origin) and on Enter
-    /// (after the panel has hidden itself with `committed = true`).
+    /// Switch to workspace (name, num) for good. Called on Enter, and on a row
+    /// click — in either of the two shapes a click can take:
+    ///
+    /// * `close_on_select = true` (the default) and Enter: *after* the panel
+    ///   has hidden itself with `committed = true`, so the app sees `hidden`
+    ///   first and this call second, with the panel already down.
+    /// * `close_on_select = false`: while the panel stays open, with that
+    ///   workspace adopted as its new origin — closing later stays there.
     pub switch: WorkspaceFn,
     /// The pointer has rested on a row long enough to preview it (name, num).
     /// A preview is a *real* workspace switch — sway renders only the visible
@@ -87,11 +134,13 @@ pub struct PanelCallbacks {
     pub preview: WorkspaceFn,
     /// The panel was hidden (Esc, click, or `hide()`); the app resumes captures.
     ///
-    /// `committed` is true when the hide is the first half of a row click: the
-    /// switch that follows is what the user asked for, so a preview in progress
-    /// must *not* be reverted. It is false for every other way out (Esc, a
-    /// click outside, `svitek hide|toggle`), which is when the app takes the
-    /// user back to the workspace they opened the panel on.
+    /// `committed` is true when the hide is the first half of a commit — Enter,
+    /// or a row click with `close_on_select` (the default): the `switch` that
+    /// follows is what the user asked for, so a preview in progress must *not*
+    /// be reverted. It is false for every other way out (Esc, a click outside,
+    /// `svitek hide|toggle`), which is when the app takes the user back to the
+    /// workspace they opened the panel on. With `close_on_select = false` a row
+    /// click does not hide at all, so this callback is not part of it.
     pub hidden: Box<dyn Fn(bool)>,
 }
 
@@ -138,9 +187,13 @@ struct Row {
 /// The resident panel window. Single-threaded (GTK main context only).
 pub struct Panel {
     window: gtk4::ApplicationWindow,
-    /// Vertical box inside the ScrolledWindow holding the rows.
+    /// The box inside the ScrolledWindow holding the rows: vertical (a column
+    /// of rows) for `left`/`right`, horizontal (a strip of cards) for `center`.
     list: gtk4::Box,
     scroller: gtk4::ScrolledWindow,
+    /// Which of the two layouts we built, kept because it decides how a row is
+    /// assembled, which way the selection scrolls, and nothing else.
+    position: Position,
     rows: RefCell<Vec<Row>>,
     /// The workspaces the current rows were built from — used to skip a rebuild
     /// when `update()` is called with unchanged data (the common case: a frame
@@ -148,6 +201,9 @@ pub struct Panel {
     rendered: RefCell<Vec<WorkspaceInfo>>,
     callbacks: PanelCallbacks,
     thumb_width: i32,
+    /// `config.close_on_select`: whether clicking a row closes the panel (the
+    /// default) or only moves the origin to it and leaves the panel up.
+    close_on_select: bool,
     visible: Cell<bool>,
     /// The workspace that was focused when the panel was shown, for as long as
     /// it is shown. The `.focused` marker stays on *this* row the whole time,
@@ -176,7 +232,7 @@ pub struct Panel {
     hover_armed: Cell<bool>,
     /// When the panel was last shown; `PREVIEW_GRACE` is measured from here.
     shown_at: Cell<Option<Instant>>,
-    /// Set by a row click just before `hide()`, so the `hidden` callback knows
+    /// Set by `commit()` just before `hide()`, so the `hidden` callback knows
     /// this hide is a commit and must not revert the preview. Read (and
     /// cleared) inside `hide()`, which is what makes the two race-free: they
     /// are one straight-line sequence on the GTK main thread.
@@ -189,13 +245,14 @@ pub struct Panel {
 impl Panel {
     /// Build the window (layer OVERLAY, anchored on all four edges so the
     /// surface covers the output, exclusive zone 0, keyboard mode so that Esc
-    /// closes it) and the panel frame inside it — `panel_width` wide, full
-    /// height, at the edge `config.position` names, with a click-swallowing
-    /// scrim over the rest of the output. Does not show it. Installs the CSS
-    /// built from `config.colors`.
+    /// closes it) and the panel frame inside it — either a `panel_width`-wide,
+    /// full-height column at the edge `config.position` names, or a centered
+    /// strip of cards — with a click-swallowing scrim over the rest of the
+    /// output. Does not show it. Installs the CSS built from `config.colors`.
     pub fn new(app: &gtk4::Application, config: &Config, callbacks: PanelCallbacks) -> Rc<Panel> {
         let thumb_width = config.thumbnail_width.clamp(80, 1000) as i32;
         let panel_width = thumb_width + TEXT_COLUMN_WIDTH + CHROME_WIDTH;
+        let centered = config.position == Position::Center;
 
         install_css(&config.colors);
 
@@ -240,27 +297,69 @@ impl Panel {
         window.set_keyboard_mode(KeyboardMode::Exclusive);
 
         // --- contents ------------------------------------------------------
-        let list = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-        list.add_css_class("ws-list");
+        // Cards side by side, or rows stacked. One `gtk4::Box` either way, so
+        // everything downstream (rebuild, hit tests, `compute_bounds`) is the
+        // same code for both.
+        let list = if centered {
+            let strip = gtk4::Box::new(gtk4::Orientation::Horizontal, CARD_SPACING);
+            strip.add_css_class("ws-strip");
+            strip
+        } else {
+            let column = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+            column.add_css_class("ws-list");
+            column
+        };
 
         let scroller = gtk4::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk4::PolicyType::Never)
-            .vscrollbar_policy(gtk4::PolicyType::Automatic)
-            .propagate_natural_width(false)
+            // The scrollable axis is the one the workspaces run along.
+            .hscrollbar_policy(if centered {
+                gtk4::PolicyType::Automatic
+            } else {
+                gtk4::PolicyType::Never
+            })
+            .vscrollbar_policy(if centered {
+                gtk4::PolicyType::Never
+            } else {
+                gtk4::PolicyType::Automatic
+            })
+            // A scrollable axis asks for nothing by default (that is the whole
+            // point of scrolling). The strip must ask for its cards instead, so
+            // that a handful of workspaces make a small strip rather than a
+            // full-width one; the column's width is pinned below and its height
+            // is meant to be the whole output, so it keeps asking for nothing.
+            .propagate_natural_width(centered)
+            .propagate_natural_height(centered)
             .vexpand(true)
             .child(&list)
             .build();
-        // The panel proper: exactly `panel_width` wide (halign != Fill makes
-        // GTK allocate the natural width, which the size request pins), full
-        // height, at the configured edge of the surface.
         scroller.add_css_class("panel");
-        scroller.set_size_request(panel_width, -1);
         scroller.set_hexpand(true);
-        scroller.set_halign(match config.position {
-            Position::Left => gtk4::Align::Start,
-            Position::Right => gtk4::Align::End,
-        });
-        scroller.set_valign(gtk4::Align::Fill);
+        if centered {
+            // The strip is as wide as its cards and as tall as one card row —
+            // and, because `halign`/`valign` are not Fill, GTK clamps that
+            // natural size to what is available (`adjust_for_align` takes the
+            // MIN). So nine cards on a 1280 px output do not overflow or get
+            // clipped: the strip stops at the output's width and the horizontal
+            // scrollbar takes over.
+            scroller.set_halign(gtk4::Align::Center);
+            scroller.set_valign(gtk4::Align::Center);
+            scroller.set_vexpand(true);
+            // A permanent scrollbar, not GTK's fade-in overlay: when more cards
+            // exist than fit, the bar is the only hint that they do, and it has
+            // to be there before the user scrolls, not after. Costs ~13 px of
+            // height under the strip and shows only when there is overflow.
+            scroller.set_overlay_scrolling(false);
+        } else {
+            // The panel proper: exactly `panel_width` wide (halign != Fill makes
+            // GTK allocate the natural width, which the size request pins), full
+            // height, at the configured edge of the surface.
+            scroller.set_size_request(panel_width, -1);
+            scroller.set_halign(match config.position {
+                Position::Right => gtk4::Align::End,
+                _ => gtk4::Align::Start,
+            });
+            scroller.set_valign(gtk4::Align::Fill);
+        }
 
         let scrim = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         scrim.add_css_class("scrim");
@@ -280,10 +379,12 @@ impl Panel {
             window,
             list,
             scroller,
+            position: config.position,
             rows: RefCell::new(Vec::new()),
             rendered: RefCell::new(Vec::new()),
             callbacks,
             thumb_width,
+            close_on_select: config.close_on_select,
             visible: Cell::new(false),
             origin: RefCell::new(None),
             previewed: RefCell::new(None),
@@ -299,8 +400,9 @@ impl Panel {
         // --- Esc and Enter ---------------------------------------------------
         // CAPTURE phase: a focused child (button, scrolled window, …) must not
         // get a chance to swallow the key first. Esc cancels (hide + revert to
-        // the origin); Enter commits the current selection, which is the same
-        // thing a click on that row does.
+        // the origin); Enter commits the current selection — the same thing a
+        // click on that row does, unless `close_on_select` is off, in which
+        // case Enter is the only way to commit.
         let keys = gtk4::EventControllerKey::new();
         keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let weak = Rc::downgrade(&panel);
@@ -330,6 +432,12 @@ impl Panel {
         // view ourselves instead.) VERTICAL without DISCRETE gives us the raw
         // deltas: a mouse wheel arrives as ±1.0 per detent, a touchpad in
         // fractions, and `Panel::on_scroll` accumulates either into whole rows.
+        //
+        // VERTICAL in the centered layout too, where the selection moves
+        // sideways: the wheel most people have only *has* a vertical axis, and
+        // "down = the next workspace" is the same gesture in both layouts.
+        // Adding HORIZONTAL would mean summing two axes and double-counting a
+        // diagonal touchpad swipe, for a gesture no mouse can make.
         let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
         scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let weak = Rc::downgrade(&panel);
@@ -478,19 +586,33 @@ impl Panel {
 
     /// Scroll `row` into view if it is not fully visible, centring it in the
     /// page. A no-op when everything fits (no scrolling to do).
+    ///
+    /// Along the axis the workspaces run in: the column layouts scroll the
+    /// vertical adjustment, the centered strip the horizontal one. The
+    /// arithmetic is the same either way and lives in `scroll_target`.
     fn scroll_into_view(&self, row: &Row) {
         let Some(bounds) = row.root.compute_bounds(&self.list) else {
             return;
         };
-        let adj = self.scroller.vadjustment();
-        let (top, height) = (bounds.y() as f64, bounds.height() as f64);
-        let page = adj.page_size();
-        if page <= 0.0 || height >= page {
-            return;
-        }
-        let value = adj.value();
-        if top < value || top + height > value + page {
-            let target = (top - (page - height) / 2.0).clamp(adj.lower(), (adj.upper() - page).max(adj.lower()));
+        let horizontal = self.position == Position::Center;
+        let adj = if horizontal {
+            self.scroller.hadjustment()
+        } else {
+            self.scroller.vadjustment()
+        };
+        let (start, extent) = if horizontal {
+            (bounds.x() as f64, bounds.width() as f64)
+        } else {
+            (bounds.y() as f64, bounds.height() as f64)
+        };
+        if let Some(target) = scroll_target(
+            start,
+            extent,
+            adj.value(),
+            adj.page_size(),
+            adj.lower(),
+            adj.upper(),
+        ) {
             adj.set_value(target);
         }
     }
@@ -637,39 +759,62 @@ impl Panel {
         self.scroll_name_into_view(&name);
     }
 
-    /// Enter: take the selection for real. The same two steps as a row click —
-    /// hide as a *commit* (so the `hidden` callback does not revert), then ask
-    /// for the switch. With nothing selected or previewed the selection is
-    /// still the origin and there is nothing to switch to, so it is a plain
-    /// hide.
+    /// Enter: take the selection for real. The selection is what a preview is
+    /// on its way to, else what is being previewed (the origin, until something
+    /// moved it), and `commit` does the rest.
     fn commit_selection(&self) {
-        if !self.visible.get() {
-            return;
-        }
         let pending = self.pending.borrow().as_ref().map(|p| (p.name.clone(), p.num));
-        let previewed = self.previewed.borrow().clone();
-        let origin = self.origin.borrow().clone();
-
-        // The selection: what a preview is on its way to, else what is being
-        // previewed (the origin, until something moved it).
-        let target = pending.clone().or_else(|| {
-            previewed.clone().map(|name| {
+        let target = pending.or_else(|| {
+            let previewed = self.previewed.borrow().clone();
+            previewed.map(|name| {
                 let num = self.rows.borrow().iter().find(|r| r.name == name).and_then(|r| r.num);
                 (name, num)
             })
         });
-        // Nothing has moved since the panel opened, so there is nowhere to go:
-        // hiding *is* the commit.
-        let unmoved = pending.is_none() && previewed.is_some() && previewed == origin;
+        self.commit(target, "Enter");
+    }
+
+    /// A row was clicked. With `close_on_select` (the default) that is a commit
+    /// of *that* row — identical to Enter with the selection on it, whatever
+    /// hover or the wheel had selected, and whatever preview is still in flight
+    /// (`commit` hides, which cancels it, and the click's own target wins).
+    /// Otherwise the click only moves the origin here and switches, leaving the
+    /// panel up so more workspaces can be visited.
+    fn on_row_clicked(&self, name: &str, num: Option<i32>) {
+        if self.close_on_select {
+            self.commit(Some((name.to_string(), num)), "click");
+        } else {
+            self.adopt_origin(name);
+            log::debug!("click switches to workspace {name:?}; panel stays open");
+            (self.callbacks.switch)(name, num);
+        }
+    }
+
+    /// Take `target` for real: hide as a *commit* (so the `hidden` callback
+    /// does not revert the preview), then ask for the switch — in that order,
+    /// because `switch` must see the panel already down (see `main.rs`). When
+    /// the target is where the user already is and nothing has been previewed
+    /// away from it, there is nowhere to go and hiding *is* the commit.
+    /// `why` only names the gesture in the log.
+    fn commit(&self, target: Option<(String, Option<i32>)>, why: &str) {
+        if !self.visible.get() {
+            return;
+        }
+        let plain_hide = commit_is_a_plain_hide(
+            target.as_ref().map(|(n, _)| n.as_str()),
+            self.previewed.borrow().as_deref(),
+            self.origin.borrow().as_deref(),
+            self.pending.borrow().is_some(),
+        );
 
         self.committed.set(true);
         self.hide();
         match target {
-            Some((name, num)) if !unmoved => {
-                log::debug!("Enter commits workspace {name:?}");
+            Some((name, num)) if !plain_hide => {
+                log::debug!("{why} commits workspace {name:?}");
                 (self.callbacks.switch)(&name, num);
             }
-            _ => log::debug!("Enter commits the origin workspace; nothing to switch to"),
+            _ => log::debug!("{why} commits the origin workspace; nothing to switch to"),
         }
     }
 
@@ -723,9 +868,10 @@ impl Panel {
         (self.callbacks.preview)(name, num);
     }
 
-    /// Make `name` the origin while the panel stays open (a row was clicked):
-    /// the `.focused` marker moves to its row, any pending or shown preview is
-    /// forgotten, and the wheel/hover selection restarts from here.
+    /// Make `name` the origin while the panel stays open (a row was clicked
+    /// with `close_on_select = false`): the `.focused` marker moves to its row,
+    /// any pending or shown preview is forgotten, and the wheel/hover selection
+    /// restarts from here.
     fn adopt_origin(&self, name: &str) {
         self.cancel_pending();
         *self.origin.borrow_mut() = Some(name.to_string());
@@ -801,12 +947,20 @@ impl Panel {
             self.list.append(&row.root);
             rows.push(row);
         }
+        if self.position == Position::Center {
+            log::debug!(
+                "centered strip of {} cards wants {} px",
+                rows.len(),
+                strip_width(rows.len(), self.thumb_width)
+            );
+        }
         *self.rows.borrow_mut() = rows;
     }
 
     fn build_row(&self, ws: &WorkspaceInfo, me: &Weak<Panel>) -> Row {
         let tw = self.thumb_width;
         let th = tw * 9 / 16;
+        let card = self.position == Position::Center;
 
         let picture = gtk4::Picture::new();
         picture.set_can_shrink(true);
@@ -827,68 +981,40 @@ impl Panel {
         let thumb = gtk4::Overlay::new();
         thumb.add_css_class("thumb");
         thumb.set_overflow(gtk4::Overflow::Hidden);
-        thumb.set_halign(gtk4::Align::Start);
+        // A card is exactly thumbnail-wide, so Start and Center coincide; the
+        // Center is insurance for the day a very long window title (or a very
+        // large font) does widen a card after all.
+        thumb.set_halign(if card {
+            gtk4::Align::Center
+        } else {
+            gtk4::Align::Start
+        });
         thumb.set_valign(gtk4::Align::Start);
         thumb.set_size_request(tw, th);
         thumb.set_child(Some(&picture));
         thumb.add_overlay(&hint);
         thumb.add_overlay(&name);
 
-        // Text column: one line per window, capped.
-        let text = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
-        text.add_css_class("wins");
-        text.set_size_request(TEXT_COLUMN_WIDTH, -1);
-        text.set_hexpand(true);
-        text.set_valign(gtk4::Align::Start);
-
+        // The window list: beside the thumbnail in a column row, under it in a
+        // card. Same labels and classes either way, only the width budget and
+        // the line cap differ.
         let mut titles = Vec::new();
-        if ws.windows.is_empty() {
-            let empty = gtk4::Label::new(Some("empty"));
-            empty.add_css_class("dim");
-            empty.set_xalign(0.0);
-            text.append(&empty);
+        let text = window_list(ws, card, &mut titles);
+
+        // A card stacks (thumbnail over titles) where a row lines up
+        // (thumbnail beside titles); the class list keeps `.ws-row` so the
+        // `.focused` / `.previewing` colours are one rule for both, with
+        // `.ws-card` for what only the strip needs.
+        let root = if card {
+            let b = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            b.add_css_class("ws-card");
+            // Pin the width so every card in the strip is the same size and
+            // the thumbnails line up, whatever their titles are.
+            b.set_size_request(card_width(tw), -1);
+            b
         } else {
-            for w in ws.windows.iter().take(MAX_WINDOW_LINES) {
-                let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-
-                let title = gtk4::Label::new(Some(if w.title.is_empty() {
-                    "(untitled)"
-                } else {
-                    &w.title
-                }));
-                title.add_css_class("title");
-                if w.focused {
-                    title.add_css_class("win-focused");
-                }
-                title.set_xalign(0.0);
-                title.set_hexpand(true);
-                title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-                title.set_max_width_chars(20);
-                line.append(&title);
-                titles.push(title);
-
-                if let Some(id) = w.app_id.as_deref().filter(|s| !s.is_empty()) {
-                    let app = gtk4::Label::new(Some(id));
-                    app.add_css_class("appid");
-                    app.set_xalign(1.0);
-                    app.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-                    app.set_max_width_chars(12);
-                    line.append(&app);
-                }
-                text.append(&line);
-            }
-            if ws.windows.len() > MAX_WINDOW_LINES {
-                let more = gtk4::Label::new(Some(&format!(
-                    "+{} more",
-                    ws.windows.len() - MAX_WINDOW_LINES
-                )));
-                more.add_css_class("dim");
-                more.set_xalign(0.0);
-                text.append(&more);
-            }
-        }
-
-        let root = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+            gtk4::Box::new(gtk4::Orientation::Horizontal, 10)
+        };
         root.add_css_class("ws-row");
         if self.is_marked_focused(ws) {
             root.add_css_class("focused");
@@ -909,11 +1035,10 @@ impl Panel {
         let ws_num = ws.num;
         click.connect_released(move |_, _, _, _| {
             if let Some(p) = clicked.upgrade() {
-                // A click makes this workspace the new origin and keeps the
-                // panel open: the `.focused` marker moves here, previews now
-                // measure from here, and closing the panel later stays here.
-                p.adopt_origin(&ws_name);
-                (p.callbacks.switch)(&ws_name, ws_num);
+                // Selecting a workspace: closes the panel by default, or (with
+                // `close_on_select = false`) switches and leaves it up with
+                // this row as the new origin. `on_row_clicked` decides.
+                p.on_row_clicked(&ws_name, ws_num);
             }
         });
         root.add_controller(click);
@@ -961,6 +1086,131 @@ impl Panel {
 
 // ------------------------------------------------------------------ helpers --
 
+/// The width of one card in the centered strip: its thumbnail plus the padding
+/// and border around it, and nothing else. The window lines under the
+/// thumbnail are capped and ellipsized so they can never widen it (see
+/// `window_line`) — a strip of cards that were each as wide as their longest
+/// window title would jump about every time a title changed.
+fn card_width(thumb_width: i32) -> i32 {
+    thumb_width + CARD_CHROME_WIDTH
+}
+
+/// What the whole strip asks for: `cards` cards, the gaps between them, and the
+/// strip's own padding. Only the *wanted* width — GTK clamps it to the output
+/// and scrolls the rest — so this is what tells us how many workspaces fit.
+fn strip_width(cards: usize, thumb_width: i32) -> i32 {
+    let n = cards as i32;
+    let gaps = (n - 1).max(0);
+    n * card_width(thumb_width) + gaps * CARD_SPACING + 2 * STRIP_PADDING
+}
+
+/// Where a scroll adjustment has to move so that the box `start .. start+extent`
+/// is fully inside the page, centred in it; `None` when it already is, when
+/// there is nothing to scroll, or when the box cannot fit anyway.
+///
+/// One function for both layouts: the column feeds it the row's top and height
+/// against the vertical adjustment, the centered strip the card's left and
+/// width against the horizontal one.
+fn scroll_target(
+    start: f64,
+    extent: f64,
+    value: f64,
+    page: f64,
+    lower: f64,
+    upper: f64,
+) -> Option<f64> {
+    if page <= 0.0 || extent >= page {
+        return None;
+    }
+    if start >= value && start + extent <= value + page {
+        return None;
+    }
+    Some((start - (page - extent) / 2.0).clamp(lower, (upper - page).max(lower)))
+}
+
+/// The window list of one workspace: `card` picks the compact form that goes
+/// under a thumbnail in the centered strip, otherwise the wide column that goes
+/// beside one. Appends every title label to `titles`, in `ws.windows` order, so
+/// `apply_flags` can move the `.win-focused` class without a rebuild.
+fn window_list(ws: &WorkspaceInfo, card: bool, titles: &mut Vec<gtk4::Label>) -> gtk4::Box {
+    let max_lines = if card { MAX_CARD_LINES } else { MAX_WINDOW_LINES };
+
+    let text = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    text.add_css_class("wins");
+    if card {
+        text.add_css_class("card-wins");
+        // No width request at all: the card's own request is the width budget,
+        // and asking for more here is exactly how a card would grow past its
+        // thumbnail.
+        text.set_halign(gtk4::Align::Fill);
+    } else {
+        text.set_size_request(TEXT_COLUMN_WIDTH, -1);
+    }
+    text.set_hexpand(true);
+    text.set_valign(gtk4::Align::Start);
+
+    if ws.windows.is_empty() {
+        let empty = gtk4::Label::new(Some("empty"));
+        empty.add_css_class("dim");
+        empty.set_xalign(0.0);
+        empty.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        empty.set_max_width_chars(if card { 8 } else { -1 });
+        text.append(&empty);
+    } else {
+        for w in ws.windows.iter().take(max_lines) {
+            let (line, title) = window_line(w, card);
+            text.append(&line);
+            titles.push(title);
+        }
+        if ws.windows.len() > max_lines {
+            let more = gtk4::Label::new(Some(&format!("+{} more", ws.windows.len() - max_lines)));
+            more.add_css_class("dim");
+            more.set_xalign(0.0);
+            text.append(&more);
+        }
+    }
+    text
+}
+
+/// One "title … app_id" line, and the title label (the one that carries
+/// `.win-focused`).
+///
+/// Both labels ellipsize, and both have a `max-width-chars` cap — which in GTK
+/// caps a label's *natural* width, not what it is given. That is the whole
+/// trick behind a card that is never wider than its thumbnail: the line asks
+/// for far less than the card is worth, the title takes whatever the card
+/// actually has (`hexpand`), and the text that does not fit becomes an ellipsis
+/// instead of pushing the card out. The caps are tighter in a card because the
+/// budget there is the thumbnail's width, not a 260 px text column.
+fn window_line(w: &WindowInfo, card: bool) -> (gtk4::Box, gtk4::Label) {
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+
+    let title = gtk4::Label::new(Some(if w.title.is_empty() {
+        "(untitled)"
+    } else {
+        &w.title
+    }));
+    title.add_css_class("title");
+    if w.focused {
+        title.add_css_class("win-focused");
+    }
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    title.set_max_width_chars(if card { 8 } else { 20 });
+    line.append(&title);
+
+    if let Some(id) = w.app_id.as_deref().filter(|s| !s.is_empty()) {
+        let app = gtk4::Label::new(Some(id));
+        app.add_css_class("appid");
+        app.set_xalign(1.0);
+        app.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        app.set_max_width_chars(if card { 8 } else { 12 });
+        line.append(&app);
+    }
+    (line, title)
+}
+
 /// Fold an accumulated scroll delta into whole wheel steps, and return what is
 /// left over to carry into the next event.
 ///
@@ -976,6 +1226,24 @@ fn wheel_steps(accum: f64) -> (i32, f64) {
     // selection is clamped to the list anyway.
     let whole = accum.trunc().clamp(-1000.0, 1000.0);
     (whole as i32, accum - whole)
+}
+
+/// Whether committing `target` has nowhere to go, so hiding the panel is the
+/// whole of it.
+///
+/// True only when all three agree that nothing has moved since `show()`: the
+/// commit names the origin, that is also what is being previewed (i.e. no
+/// preview took sway anywhere else), and no preview is waiting out its
+/// debounce. Anything else is a real switch — including a commit of the origin
+/// *after* a preview, which is how the user comes back — and asking sway for it
+/// costs nothing but is what makes coming back work.
+fn commit_is_a_plain_hide(
+    target: Option<&str>,
+    previewed: Option<&str>,
+    origin: Option<&str>,
+    pending: bool,
+) -> bool {
+    !pending && target.is_some() && target == previewed && target == origin
 }
 
 /// Move a selection `steps` rows through a list of `len` rows. Clamped at both
@@ -1066,10 +1334,11 @@ window.svitek {{ background-color: {SCRIM_BG}; color: {fg}; }}
 window.svitek scrolledwindow,
 window.svitek viewport {{ background: none; background-color: transparent; }}
 window.svitek scrolledwindow.panel {{ background-color: {bg}; }}
-window.svitek .ws-list {{ padding: 8px; }}
+window.svitek .ws-list {{ padding: {STRIP_PADDING}px; }}
+window.svitek .ws-strip {{ padding: {STRIP_PADDING}px; }}
 window.svitek .ws-row {{
-  padding: 8px;
-  border: 2px solid transparent;
+  padding: {ROW_PADDING}px;
+  border: {ROW_BORDER}px solid transparent;
   border-radius: 10px;
   background-color: transparent;
 }}
@@ -1082,6 +1351,7 @@ window.svitek .ws-row.previewing {{
   border-color: alpha({focused}, 0.6);
   background-color: alpha({focused}, 0.07);
 }}
+window.svitek .ws-card {{ padding: {ROW_PADDING}px; }}
 window.svitek .thumb {{
   border-radius: 6px;
   background-color: alpha({dim}, 0.13);
@@ -1097,6 +1367,7 @@ window.svitek .ws-name {{
 }}
 window.svitek .hint {{ font-size: 85%; color: {dim}; }}
 window.svitek .wins {{ margin-top: 1px; }}
+window.svitek .card-wins {{ margin-top: 3px; }}
 window.svitek .title {{ font-size: 95%; color: {fg}; }}
 window.svitek .win-focused {{ font-weight: bold; color: {focused}; }}
 window.svitek .appid {{ font-size: 82%; color: {dim}; }}
@@ -1231,10 +1502,91 @@ mod tests {
     }
 
     #[test]
+    fn committing_where_you_already_are_is_just_a_hide() {
+        // The panel opened on "1", nothing hovered, nothing scrolled: Enter (or
+        // a click on row 1) has nowhere to switch to.
+        assert!(commit_is_a_plain_hide(Some("1"), Some("1"), Some("1"), false));
+        // Origin "1", a preview took sway to "2": committing "2" is real…
+        assert!(!commit_is_a_plain_hide(Some("2"), Some("2"), Some("1"), false));
+        // …and so is coming back to "1" — that switch is how you come back.
+        assert!(!commit_is_a_plain_hide(Some("1"), Some("2"), Some("1"), false));
+        // A preview still waiting out its debounce means sway has not been
+        // asked yet, so even a commit of the origin has to ask.
+        assert!(!commit_is_a_plain_hide(Some("1"), Some("1"), Some("1"), true));
+        // Nothing selected at all (no rows, no origin): nothing to switch to,
+        // but `commit` logs that case separately — the rule must not claim it.
+        assert!(!commit_is_a_plain_hide(None, None, None, false));
+    }
+
+    #[test]
     fn panel_width_leaves_room_for_the_text_column() {
         let cfg = Config::default();
         let w = cfg.thumbnail_width as i32 + TEXT_COLUMN_WIDTH + CHROME_WIDTH;
         assert!(w > cfg.thumbnail_width as i32 + TEXT_COLUMN_WIDTH);
         assert_eq!(w, 240 + 260 + 46);
+    }
+
+    #[test]
+    fn the_centered_strip_has_its_own_selectors_without_touching_the_row_colours() {
+        let c = Colors::default();
+        let css = stylesheet(&c);
+        assert!(css.contains(".ws-strip"), "the strip needs its own padding");
+        assert!(css.contains(".ws-card"), "cards need their own rule");
+        assert!(css.contains(".card-wins"));
+        // A card is a `.ws-row` too, so focus and preview are one rule for both
+        // layouts — changing either would change the column as well.
+        assert!(css.contains(&format!(
+            ".ws-row.focused {{\n  border-color: {};",
+            c.focused
+        )));
+        assert!(css.contains(".ws-row.previewing"));
+        // `card_width` counts the padding the stylesheet actually sets.
+        assert!(css.contains(&format!(".ws-card {{ padding: {ROW_PADDING}px; }}")));
+    }
+
+    #[test]
+    fn a_card_is_exactly_as_wide_as_its_thumbnail_plus_its_chrome() {
+        assert_eq!(card_width(240), 240 + 20);
+        assert_eq!(card_width(80), 100);
+        // …and the strip is the cards, the gaps between them, and its padding.
+        assert_eq!(strip_width(1, 240), 260 + 16);
+        assert_eq!(strip_width(3, 240), 3 * 260 + 2 * 10 + 16);
+        // Nine cards want more than a 1280 px output has: that is the case the
+        // horizontal scrollbar exists for.
+        assert!(strip_width(9, 240) > 1280);
+        assert!(strip_width(4, 240) < 1280);
+        // No gap to count when there is nothing to gap.
+        assert_eq!(strip_width(0, 240), 16);
+    }
+
+    #[test]
+    fn nothing_scrolls_while_the_selection_is_already_in_the_page() {
+        // A 100-long box at 0 in a 500-long page that starts at 0: visible.
+        assert_eq!(scroll_target(0.0, 100.0, 0.0, 500.0, 0.0, 900.0), None);
+        assert_eq!(scroll_target(400.0, 100.0, 0.0, 500.0, 0.0, 900.0), None);
+        // Everything fits (page >= content): there is nothing to scroll.
+        assert_eq!(scroll_target(0.0, 500.0, 0.0, 500.0, 0.0, 500.0), None);
+        // A page of zero (not laid out yet) is not something to compute with.
+        assert_eq!(scroll_target(0.0, 10.0, 0.0, 0.0, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn an_off_screen_selection_is_centred_in_the_page_and_clamped_to_the_ends() {
+        // Below/right of the page: centred, 700 - (500-100)/2 = 500, with
+        // enough content behind it (upper 1200) for that to be reachable.
+        assert_eq!(
+            scroll_target(700.0, 100.0, 0.0, 500.0, 0.0, 1200.0),
+            Some(500.0)
+        );
+        // The last box cannot be centred past the end of the content.
+        assert_eq!(
+            scroll_target(800.0, 100.0, 0.0, 500.0, 0.0, 900.0),
+            Some(400.0)
+        );
+        // Nor the first one before its start.
+        assert_eq!(
+            scroll_target(0.0, 100.0, 300.0, 500.0, 0.0, 900.0),
+            Some(0.0)
+        );
     }
 }
