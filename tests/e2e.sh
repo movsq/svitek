@@ -3,16 +3,37 @@
 #
 #   tests/e2e.sh          # builds, runs, cleans up; exit 0 = everything passed
 #
-# Never touches the sway session you are sitting in: it starts its own headless
-# compositor (tests/headless-sway.sh), its own control socket and its own
-# XDG_CONFIG_HOME, and unsets I3SOCK (swayipc prefers it over SWAYSOCK).
-# Needs: sway, foot, grim, and either python3+PIL or ImageMagick for the
-# thumbnail pixel check.
+# Never touches the sway session you are sitting in. The first thing it does is
+# unset SWAYSOCK, I3SOCK, WAYLAND_DISPLAY and DISPLAY, so nothing here — not
+# even the EXIT trap on an early failure — can reach your compositor; it then
+# starts its own headless sway (tests/headless-sway.sh) with its own control
+# socket and its own XDG_CONFIG_HOME. (I3SOCK matters because swayipc prefers
+# it over SWAYSOCK.)
+#
+# Needs:
+#   * sway, foot, grim, swaymsg, setsid
+#   * xkbcli (libxkbcommon-tools) — the injector compiles its keymap with it
+#   * a Rust toolchain, plus the gtk4 and gtk4-layer-shell development
+#     packages: the script builds svitek and the test injector from source
+#   * python3 with Pillow, or ImageMagick 7 (the `magick` command — ImageMagick
+#     6's `convert` is not enough), for the pixel probes
+#
+# Takes roughly 100 s. It writes screenshots, `get_workspaces` dumps and the
+# daemon logs to $SVITEK_TEST_DIR and leaves them there whether it passes or
+# fails; the final line says where. Set SVITEK_TEST_DIR to choose the place
+# (it must be an absolute path whose last component starts with `svitek-`: the
+# script wipes it before the run).
 set -uo pipefail
+
+# Before anything else, and before the EXIT trap below is armed: forget the
+# user's session completely. Everything after this line can only talk to the
+# nested sway, because there is nothing else left to talk to.
+unset SWAYSOCK I3SOCK WAYLAND_DISPLAY DISPLAY
 
 cd "$(dirname "$0")/.."
 export SVITEK_TEST_DIR="${SVITEK_TEST_DIR:-${XDG_RUNTIME_DIR:-/tmp}/svitek-e2e-$$}"
 SVITEK=./target/release/svitek
+NESTED_SOCK="$SVITEK_TEST_DIR/sway-ipc.sock"
 FAILED=0
 
 pass() { printf '  \033[32mPASS\033[0m %s\n' "$*"; }
@@ -20,73 +41,162 @@ fail() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAILED=1; }
 step() { printf '\n== %s\n' "$*"; }
 check() { if [ "$1" = "$2" ]; then pass "$3 ($2)"; else fail "$3: expected '$2', got '$1'"; fi; }
 
+# --- preflight -------------------------------------------------------------
+# Everything the run needs, checked in one go with one message, before the
+# trap is armed and before a single process is started.
+HAVE_PY3=0; command -v python3 >/dev/null 2>&1 && HAVE_PY3=1
+HAVE_PIL=0; [ "$HAVE_PY3" = 1 ] && python3 -c 'import PIL' 2>/dev/null && HAVE_PIL=1
+missing=
+for t in sway foot grim cargo xkbcli setsid swaymsg; do
+  command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+done
+[ "$HAVE_PIL" = 1 ] || command -v magick >/dev/null 2>&1 ||
+  missing="$missing python3+Pillow-or-ImageMagick-7(magick)"
+if [ -n "$missing" ]; then
+  echo "tests/e2e.sh: need$missing" >&2
+  echo "(needs sway foot grim cargo xkbcli setsid swaymsg, plus python3 with Pillow or ImageMagick 7," >&2
+  echo " and the gtk4 / gtk4-layer-shell development packages to build svitek)" >&2
+  exit 2
+fi
+
+# The one destructive thing this script does is `rm -rf "$SVITEK_TEST_DIR"`,
+# and SVITEK_TEST_DIR comes from the environment. Refuse anything that is not
+# obviously a scratch directory of ours.
+assert_scratch_dir() {
+  local d=$SVITEK_TEST_DIR why= base parent
+  # Strip trailing slashes, but only down to "/" itself, which must stay
+  # recognisable as "/" rather than turning into the empty string.
+  while [ "${d%/}" != "$d" ] && [ "$d" != "/" ]; do d=${d%/}; done
+  base=${d##*/}; parent=${d%/*}
+  if [ -z "$d" ]; then why="it is empty"
+  elif [ "$d" = "/" ]; then why="it is /"
+  elif [ "${d#/}" = "$d" ]; then why="it is not an absolute path"
+  elif [ -n "${HOME:-}" ] && [ "$d" = "${HOME%/}" ]; then why="it is \$HOME"
+  elif [ "${base#svitek-}" = "$base" ]; then
+    why="its last component '$base' does not start with 'svitek-'"
+  elif [ -z "$parent" ]; then why="it sits directly in /"
+  else
+    case "$PWD/" in "$d"/*) why="it contains the repo ($PWD)";; esac
+  fi
+  if [ -n "$why" ]; then
+    echo "tests/e2e.sh: refusing to wipe SVITEK_TEST_DIR='$SVITEK_TEST_DIR': $why" >&2
+    echo "point it at a scratch directory, e.g. \${XDG_RUNTIME_DIR}/svitek-e2e" >&2
+    exit 2
+  fi
+}
+assert_scratch_dir
+
 cleanup() {
   local rc=$?
   [ "$rc" != 0 ] && FAILED=1   # an early `exit N` is a failure too
   [ -n "${DAEMON_STARTED:-}" ] && $SVITEK quit >/dev/null 2>&1
-  # Kill only the windows *this* nested sway owns, never anything of the user's.
-  swaymsg -t get_tree 2>/dev/null | grep -oE '"pid": [0-9]+' | grep -oE '[0-9]+' |
-    while read -r p; do kill "$p" 2>/dev/null; done
+  # Kill only the windows *this* nested sway owns, never anything of the
+  # user's. Guarded twice over: the ambient SWAYSOCK is unset at the top of the
+  # script, and this only ever runs when SWAYSOCK is the socket
+  # headless-sway.sh made for us and that socket is really there. So an early
+  # exit — a missing tool, a build failure, Ctrl-C — reaches nothing.
+  if [ "${SWAYSOCK:-}" = "$NESTED_SOCK" ] && [ -S "$NESTED_SOCK" ]; then
+    swaymsg -s "$NESTED_SOCK" -t get_tree 2>/dev/null |
+      grep -oE '"pid": [0-9]+' | grep -oE '[0-9]+' |
+      while read -r p; do kill "$p" 2>/dev/null; done
+  fi
   tests/headless-sway.sh stop >/dev/null 2>&1
   sleep 0.3
-  [ "$FAILED" = 0 ] && printf '\n\033[32mall e2e checks passed\033[0m\n' \
+  [ "$FAILED" = 0 ] && printf '\n\033[32mall e2e checks passed\033[0m (artifacts in %s)\n' "$SVITEK_TEST_DIR" \
                     || printf '\n\033[31me2e checks FAILED\033[0m (artifacts in %s)\n' "$SVITEK_TEST_DIR"
 }
 trap cleanup EXIT
 
+# --- pixel probes ----------------------------------------------------------
+# Both probes exist twice, once for Pillow and once for ImageMagick, so the
+# script runs with either installed. Every rectangle and every threshold is a
+# variable shared by the two implementations: they cannot drift apart.
+OUT_H=720                                 # the headless output, see headless-sway.sh
+THUMB_X=0; THUMB_Y=160; THUMB_W=270; THUMB_H=560
+
 # Green pixels (0-100 %) in the thumbnail column *below the first row*, i.e.
 # in the previews of the workspaces we are not on. Nothing else in the panel is
 # green, so this is how we see what those rows are showing.
-THUMBS=270x560+0+160
-green_pct() {
+green_pct() { # green_pct <png>
   if [ "$HAVE_PIL" = 1 ]; then
     python3 -c "
 from PIL import Image
-px=list(Image.open('$1').convert('RGB').crop((0,160,270,720)).get_flattened_data())
+im=Image.open('$1').convert('RGB').crop(($THUMB_X,$THUMB_Y,$THUMB_X+$THUMB_W,$THUMB_Y+$THUMB_H))
+px=list(getattr(im,'get_flattened_data',im.getdata)())
 print(sum(1 for r,g,b in px if g>100 and g>r+60 and g>b+60)*100//len(px))"
   else
-    magick "$1" -crop "$THUMBS" +repage \
+    magick "$1" -crop "${THUMB_W}x${THUMB_H}+${THUMB_X}+${THUMB_Y}" +repage \
       -fill black -fuzz 25% +opaque '#00be00' -fill white -opaque '#00be00' \
       -colorspace gray -format '%[fx:int(mean*100)]' info:
   fi
 }
-# Wait until $1 (a grep -E pattern) shows up in the daemon log, or fail.
-wait_log() {
-  for _ in $(seq 1 "${2:-50}"); do
-    grep -qE "$1" "$LOG" && return 0
-    sleep 0.1
-  done
-  fail "timed out waiting for log line /$1/"; return 1
-}
+
 # "yes" when the focused row/card marker (the border, #89b4fa) shows up in the
 # vertical slice x0 <= x < x1 of a screenshot — that colour appears nowhere else
 # on screen, so it is how we see both *that* the panel is up and *where*.
+# MARKER_PPM is the same threshold for both backends: parts per million of the
+# pixels in the slice, so a wide slice and a narrow one are judged alike.
+MARKER_PPM=1000    # 0.1 % of the slice
 focus_marker_in() { # focus_marker_in <png> <x0> <x1>
   if [ "$HAVE_PIL" = 1 ]; then
     python3 -c "
 from PIL import Image
-px=list(Image.open('$1').convert('RGB').crop(($2,0,$3,720)).get_flattened_data())
-print('yes' if sum(1 for r,g,b in px if b>200 and 100<r<190 and g>150)>500 else 'no')"
+im=Image.open('$1').convert('RGB').crop(($2,0,$3,$OUT_H))
+px=list(getattr(im,'get_flattened_data',im.getdata)())
+hit=sum(1 for r,g,b in px if b>200 and 100<r<190 and g>150)
+print('yes' if hit*1000000 >= len(px)*$MARKER_PPM else 'no')"
   else
-    n=$(magick "$1" -crop "$(($3 - $2))x720+$2+0" +repage \
+    n=$(magick "$1" -crop "$(($3 - $2))x$OUT_H+$2+0" +repage \
           -fill black -fuzz 12% +opaque '#89b4fa' -fill white -opaque '#89b4fa' \
-          -colorspace gray -format '%[fx:int(mean*100000)]' info:)
-    [ "$n" -gt 100 ] && echo yes || echo no
+          -colorspace gray -format '%[fx:int(mean*1000000)]' info:)
+    [ "$n" -ge "$MARKER_PPM" ] && echo yes || echo no
   fi
 }
 panel_visible() { # "yes" when the focused-row border is on screen
   grim -o HEADLESS-1 "$SVITEK_TEST_DIR/probe.png"
   focus_marker_in "$SVITEK_TEST_DIR/probe.png" 0 "$PANEL_W"
 }
-# The name of the workspace sway has focused right now. Shell only (the
-# ImageMagick path of this script must work without python3): every workspace
-# object in `get_workspaces` prints its "name" before its "focused".
+
+# --- log waits -------------------------------------------------------------
+# The daemon shows the panel many times per run, so "does this line exist yet"
+# is useless after the first show: it matches a line from an earlier one and
+# returns instantly. Everything here is therefore counted.
+log_count() { grep -cE "$1" "$LOG" 2>/dev/null || true; }
+# Wait until $1 (a grep -E pattern) has matched at least $2 (default 1) times
+# in the daemon log, or fail.
+wait_log() { # wait_log <pattern> [count] [tries]
+  local want=${2:-1}
+  for _ in $(seq 1 "${3:-50}"); do
+    [ "$(log_count "$1")" -ge "$want" ] && return 0
+    sleep 0.1
+  done
+  fail "timed out waiting for $want x /$1/ in $LOG"; return 1
+}
+# Run `svitek <args>` and wait for a *new* "panel shown" line, counted from
+# before the client ran so the show cannot be missed or matched early.
+show_wait() { # show_wait <svitek args…>
+  local n; n=$(log_count 'panel shown on HEADLESS-1')
+  $SVITEK "$@"
+  wait_log 'panel shown on HEADLESS-1' $((n + 1))
+}
+
+# The name of the workspace sway has focused right now.
 focused_ws() { swaymsg -t get_workspaces | focused_ws_in /dev/stdin; }
 # The same, from a saved `get_workspaces` dump: the hold-mode probes run from
 # inside the injector (while the modifier is held) and are read back afterwards.
-focused_ws_in() {
-  grep -oE '"name": "[^"]*"|"focused": (true|false)' "$1" |
-    awk -F'"' '/"name"/ { n = $4 } /focused/ { if ($0 ~ /true/) { print n; exit } }'
+# python parses the JSON properly, so use it whenever there is a python3 at all
+# (Pillow is not needed for this one). The awk fallback is for a box with no
+# python: it relies on every workspace object printing its "name" before its
+# "focused", which is true of sway's output but is not guaranteed by JSON.
+focused_ws_in() { # focused_ws_in <json-file>
+  if [ "$HAVE_PY3" = 1 ]; then
+    python3 -c 'import json,sys
+ws=json.load(open(sys.argv[1]))
+print(next((w["name"] for w in ws if w.get("focused")), ""))' "$1"
+  else
+    grep -oE '"name": "[^"]*"|"focused": (true|false)' "$1" |
+      awk -F'"' '/"name"/ { n = $4 } /focused/ { if ($0 ~ /true/) { print n; exit } }'
+  fi
 }
 foot_on() { # foot_on <workspace> <title> [script-to-run-in-it]
   swaymsg "workspace $1" >/dev/null
@@ -105,6 +215,14 @@ start_daemon() {
   DAEMON_STARTED=1
   wait_log 'listening on' || return 1
   wait_log 'initial snapshot' || return 1
+}
+# Stop it again. DAEMON_STARTED means "a test daemon may still be running", and
+# is what makes `cleanup` quit one on an early exit; it is set by start_daemon
+# and cleared here, nowhere else.
+stop_daemon() {
+  $SVITEK quit
+  DAEMON_STARTED=
+  sleep 1
 }
 
 # write_config <extra lines…>: the daemon reads this once, at startup. Every
@@ -125,25 +243,29 @@ DAEMON_RUNS=0
 ROW_X=270
 ROW1_Y=85
 ROW2_Y=246
-HAVE_PIL=0; python3 -c 'import PIL' 2>/dev/null && HAVE_PIL=1
-[ "$HAVE_PIL" = 1 ] || command -v magick >/dev/null || { echo "need python3+PIL or ImageMagick"; exit 2; }
 
 step "build"
 cargo build --release || exit 2
 # The input injector is a separate, test-only crate (see tools/inject/src/main.rs);
 # `cargo build` in the root deliberately does not build it.
-[ -x ./target/release/inject ] || CARGO_TARGET_DIR=$PWD/target \
+CARGO_TARGET_DIR=$PWD/target \
   cargo build --release --manifest-path tools/inject/Cargo.toml || exit 2
 INJECT=./target/release/inject
 
 step "headless sway"
+assert_scratch_dir
 rm -rf "$SVITEK_TEST_DIR"; mkdir -p "$SVITEK_TEST_DIR/cfg/svitek"
 # Both of these have to be exported *before* sway starts: sway's `exec` inherits
 # sway's environment, so this is what makes the `bindsym $mod+Tab exec svitek
 # toggle` that headless-sway.sh adds for SVITEK_BIN talk to *our* daemon.
 export SVITEK_SOCKET="$SVITEK_TEST_DIR/svitek.sock"
 export SVITEK_BIN="$PWD/target/release/svitek"
-eval "$(tests/headless-sway.sh start)" || exit 2
+# `eval "$(…)"` on its own cannot fail: eval of an empty string exits 0, so a
+# sway that never came up would go unnoticed. Capture, then eval, then look.
+env_out=$(tests/headless-sway.sh start) || exit 2
+eval "$env_out"
+[ -S "${SWAYSOCK:-}" ] || { echo "headless sway left no control socket" >&2; exit 2; }
+[ "$SWAYSOCK" = "$NESTED_SOCK" ] || { echo "unexpected SWAYSOCK $SWAYSOCK" >&2; exit 2; }
 unset I3SOCK
 export XDG_CONFIG_HOME="$SVITEK_TEST_DIR/cfg"     # our own config, whatever the user has
 write_config
@@ -171,25 +293,28 @@ RUST_LOG=off $SVITEK >"$SVITEK_TEST_DIR/second.log" 2>&1
 check "$?" 1 "a second daemon refuses to start"
 
 step "toggle / show / hide"
-$SVITEK toggle; wait_log 'panel shown on HEADLESS-1'; sleep 0.4
+show_wait toggle; sleep 0.4
 check "$(panel_visible)" yes "toggle shows the panel"
 $SVITEK toggle; sleep 0.5
 check "$(panel_visible)" no  "toggle again hides it"
-$SVITEK show;   sleep 0.6
+show_wait show; sleep 0.6
 check "$(panel_visible)" yes "show"
 $SVITEK hide;   sleep 0.5
 check "$(panel_visible)" no  "hide"
 
 step "thumbnail rule: 1 -> 2 -> change 2 -> 1"
-$SVITEK toggle; sleep 0.7
+show_wait toggle; sleep 0.7
 grim -o HEADLESS-1 "$SVITEK_TEST_DIR/before.png"
-check "$(green_pct "$SVITEK_TEST_DIR/before.png")" 0 "no green in any thumbnail yet"
+G0=$(green_pct "$SVITEK_TEST_DIR/before.png")
+# A percentage, so a stray anti-aliased pixel or two is not a failure.
+if [ "$G0" -le 1 ]; then pass "no green in any thumbnail yet (${G0}%)"
+else fail "a thumbnail is already green before the change: ${G0}%"; fi
 $SVITEK hide; sleep 0.4
 # Change what workspace 2 shows, give the background capture time to file it.
 foot_on 2 GREEN "$SVITEK_TEST_DIR/green.sh"
 sleep 1
 swaymsg workspace 1 >/dev/null; sleep 1.2
-$SVITEK toggle; wait_log 'panel shown'; sleep 0.7
+show_wait toggle; sleep 0.7
 grim -o HEADLESS-1 "$SVITEK_TEST_DIR/after.png"
 G=$(green_pct "$SVITEK_TEST_DIR/after.png")
 if [ "$G" -ge 5 ]; then pass "workspace 2's row shows the CHANGED content (${G}% green)"
@@ -202,7 +327,7 @@ step "click selects a workspace"
 # arms a hover preview of that row on the way in; the click has to win over it,
 # which is the interesting half of this check.)
 swaymsg workspace 1 >/dev/null; sleep 0.6
-$SVITEK show; sleep 0.8
+show_wait show; sleep 0.8
 check "$(panel_visible)" yes "the panel is up before the click"
 $INJECT pointer HEADLESS-1 $ROW_X $ROW2_Y click >/dev/null
 sleep 1
@@ -213,11 +338,11 @@ else fail "no 'click commits workspace \"2\"' in $LOG"; fi
 
 # (b) close_on_select = false: the click switches and the panel stays up. The
 # config is only read at startup, so the daemon has to be restarted for it.
-$SVITEK quit; sleep 1
+stop_daemon
 write_config 'close_on_select = false'
 start_daemon || exit 1
 swaymsg workspace 2 >/dev/null; sleep 0.8
-$SVITEK show; sleep 0.8
+show_wait show; sleep 0.8
 $INJECT pointer HEADLESS-1 $ROW_X $ROW1_Y click >/dev/null
 sleep 1
 check "$(panel_visible)" yes "close_on_select = false keeps the panel open"
@@ -231,12 +356,11 @@ step "centered layout"
 # startup, so this needs a fresh daemon (which also starts with an empty
 # thumbnail cache — the cards show the "no preview yet" placeholder, and the
 # focus marker is what we are probing for anyway).
-$SVITEK quit; sleep 1
-DAEMON_STARTED=
+stop_daemon
 : > "$XDG_CONFIG_HOME/svitek/config.toml"        # no keys at all => the defaults
 start_daemon || exit 1
 swaymsg workspace 1 >/dev/null; sleep 1.2
-$SVITEK toggle; wait_log 'panel shown on HEADLESS-1'; sleep 0.7
+show_wait toggle; sleep 0.7
 grim -o HEADLESS-1 "$SVITEK_TEST_DIR/center.png"
 check "$(focus_marker_in "$SVITEK_TEST_DIR/center.png" 427 853)" yes \
       "the focused card is in the middle third of the output"
@@ -251,7 +375,7 @@ check "$(panel_visible)" no "a click outside the strip hides it"
 # One wheel detent moves the selection one card to the *right*, i.e. to the next
 # workspace, and previews it for real; hiding then puts us back on the origin.
 check "$(focused_ws)" 1 "the origin workspace before the wheel"
-$SVITEK toggle; wait_log 'panel shown on HEADLESS-1'; sleep 0.7
+show_wait toggle; sleep 0.7
 $INJECT scroll HEADLESS-1 640 360 1 >/dev/null 2>&1; sleep 0.9
 check "$(focused_ws)" 2 "a wheel step down previews the card to the right"
 $SVITEK hide; sleep 0.7
@@ -269,8 +393,7 @@ step "hold mode"
 #
 # The probes run from inside the injector, while Super is still held: each one
 # saves a screenshot and a `get_workspaces` dump that is read back below.
-$SVITEK quit; sleep 1
-DAEMON_STARTED=
+stop_daemon
 # `hold_selects_next = false` here so the first Mod+Tab only opens the panel and
 # the sequences below count from the origin; the default is checked in (f).
 write_config 'mode = "hold"' 'hold_selects_next = false'   # `position = "left"` too, so PANEL_W still holds
@@ -358,8 +481,7 @@ else fail "no 'the modifier was already up' in $LOG"; fi
 
 # (f) The default, `hold_selects_next = true`: the opening press already selects
 # the next workspace, so a single Mod+Tab tap is a switch — alt-tab's rule.
-$SVITEK quit; sleep 1
-DAEMON_STARTED=
+stop_daemon
 write_config 'mode = "hold"'
 start_daemon || exit 1
 swaymsg workspace 1 >/dev/null; sleep 1
@@ -376,19 +498,13 @@ sleep 1.2
 check "$(panel_visible)" no "a quick tap does not leave the panel up"
 check "$(focused_ws)" 2 "a quick Mod+Tab tap switches to the next workspace"
 
-# A picture of the interesting moment, for a human to look at.
-if [ -d "$HOME/.cache/svitek-worktrees/shots" ]; then
-  cp "$SVITEK_TEST_DIR/hold-a2.png" "$HOME/.cache/svitek-worktrees/shots/hold-after-second-tab.png"
-fi
-
 step "quit"
-$SVITEK quit; sleep 1
+stop_daemon
 # Only *our* daemon: the developer may well have their own svitek running.
 kill -0 "$DAEMON_PID" 2>/dev/null && fail "test daemon (pid $DAEMON_PID) is still alive" \
                               || pass "test daemon exited"
 [ -e "$SVITEK_SOCKET" ] && fail "control socket $SVITEK_SOCKET was left behind" \
                         || pass "control socket removed"
-DAEMON_STARTED=
 
 step "daemon log"
 if grep -E '(WARN|ERROR) +svitek' "$SVITEK_TEST_DIR"/svitek-*.log; then

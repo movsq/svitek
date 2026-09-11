@@ -19,3 +19,4 @@ path = "src/main.rs"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
+libc = "0.2"

@@ -3,13 +3,30 @@
 # screen. Prints the env vars to export. Usage:
 #   eval "$(tests/headless-sway.sh start)"   # sets SWAYSOCK, WAYLAND_DISPLAY, SVITEK_TEST_DIR
 #   tests/headless-sway.sh stop
+# `start` fails if a test sway is already running in SVITEK_TEST_DIR, and
+# `stop` only ever kills a process that really is that sway.
 # SVITEK_BIN (optional) adds `bindsym $mod+Tab exec <it> toggle` (and
 # $mod+Shift+Tab -> prev) to the generated config.
 set -euo pipefail
 DIR="${SVITEK_TEST_DIR:-${XDG_RUNTIME_DIR:-/tmp}/svitek-test}"
+
+# Is $1 a live process that is *our* nested sway (started with our config)?
+is_our_sway() {
+  local pid=${1:-}
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -qxF "$DIR/config"
+}
+
 case "${1:-start}" in
 start)
   mkdir -p "$DIR"
+  # Refuse to start a second one on top of the first: they would share $DIR,
+  # the ipc socket and the pid file, and `stop` could then only find one.
+  if [ -f "$DIR/sway.pid" ] && is_our_sway "$(cat "$DIR/sway.pid" 2>/dev/null || true)"; then
+    echo "a test sway is already running in $DIR (pid $(cat "$DIR/sway.pid")); run '$0 stop' first" >&2
+    exit 1
+  fi
   cat > "$DIR/config" <<'CFG'
 # headless test config
 set $mod Mod4
@@ -20,7 +37,6 @@ workspace 2 output HEADLESS-1
 workspace 3 output HEADLESS-2
 focus_follows_mouse no
 default_border pixel 2
-bindsym $mod+a exec true
 CFG
   # Optional: a real Mod+Tab binding, so a test can drive the alt-tab gesture
   # through sway itself instead of the control socket. Sway's `exec` inherits
@@ -50,7 +66,18 @@ CFG
   echo "export SVITEK_TEST_DIR=$DIR"
   ;;
 stop)
-  if [ -f "$DIR/sway.pid" ]; then kill "$(cat "$DIR/sway.pid")" 2>/dev/null || true; rm -f "$DIR/sway.pid"; fi
+  # The pid file can easily outlive the process it names, and pids get reused,
+  # so never kill on the number alone: check that it is alive and that
+  # /proc/<pid>/cmdline still holds the config we generated.
+  if [ -f "$DIR/sway.pid" ]; then
+    pid=$(cat "$DIR/sway.pid" 2>/dev/null || true)
+    rm -f "$DIR/sway.pid"
+    if is_our_sway "$pid"; then
+      kill "$pid" 2>/dev/null || true
+    elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "$DIR/sway.pid named pid $pid, which is not the test sway (-c $DIR/config); left alone" >&2
+    fi
+  fi
   ;;
 *) echo "usage: $0 start|stop" >&2; exit 2;;
 esac
