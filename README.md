@@ -1,9 +1,10 @@
 # svitek
 
-svitek (Czech: scroll) is a workspace switcher panel for [sway](https://swaywm.org):
-one resident process that pops a strip of workspace cards over the middle of the
-focused output, each card a thumbnail of that workspace and the window titles on
-it.
+svitek (Czech for *scroll*, the parchment kind) is a workspace switcher panel
+for [sway](https://swaywm.org): one resident process that rolls the workspaces
+of the focused output out across the middle of the screen as a strip of cards,
+each a thumbnail of that workspace with the window titles on it, and you scroll
+through them with the wheel.
 
 ![svitek: the centered card strip over a real session](docs/screenshot-center.png)
 
