@@ -6,6 +6,10 @@
 //! there is always a recent frame of whatever is visible on each output
 //! (cost is zero when nothing repaints). The main loop attributes frames to
 //! the workspace visible on that output when the frame is handled.
+//!
+//! An output with a frame in flight is skipped by the scheduler, so a frame
+//! that never completes would retire that output for good; `PENDING_DEADLINE`
+//! is what stops that (see `App::expire_pending`).
 
 use crate::model::{CaptureReason, Msg, Thumbnail};
 use async_channel::Sender;
@@ -26,6 +30,24 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 // ---------------------------------------------------------------------------
 // Public handle
 // ---------------------------------------------------------------------------
+
+/// How long a screencopy frame may stay in flight before we give up on it.
+///
+/// The scheduler skips an output that already has a pending frame, so a frame
+/// the compositor never answers — no `ready`, no `failed`, because the output
+/// was disabled mid-copy, or the request was simply lost — would take that
+/// output out of the rotation permanently and freeze its thumbnail for the rest
+/// of the session. That is not hypothetical: a headless output nothing is
+/// composited on gets no frame callback at all, and the e2e's second output
+/// wedges for exactly that reason — with a deadline it comes back on the next
+/// round, without one it never does.
+///
+/// Two seconds is the compromise. A capture normally answers in about five
+/// milliseconds; the slowest ever measured here (a nested compositor competing
+/// with a release build) was 1.25 s, so this still leaves headroom, and it is
+/// short enough that a wedged output is back within one toggle. Expiring a
+/// frame that would have arrived costs one thumbnail refresh, not correctness.
+const PENDING_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Commands the GTK thread pushes to the capture thread.
 #[derive(Debug)]
@@ -676,6 +698,66 @@ impl App {
         });
     }
 
+    /// Give up on frames the compositor never finished.
+    ///
+    /// A pending frame parks its output: `schedule` skips it and `on_ready` /
+    /// `on_failed` are the only ways out, so a request that is never answered
+    /// (an output disabled in the middle of a copy, a compositor that drops the
+    /// frame) would stop that output being captured for the rest of the
+    /// session. `PENDING_DEADLINE` past its start, we tear the frame down the
+    /// way the failure path does and let the output become due again.
+    ///
+    /// Runs whether or not we are paused: a `Toggle` or `Entered` frame
+    /// outlives a pause (only background frames are dropped there), and a
+    /// deadline nobody enforces is not a deadline.
+    fn expire_pending(&mut self) {
+        let now = Instant::now();
+        let stale: Vec<usize> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| {
+                o.pending
+                    .as_ref()
+                    .is_some_and(|p| now.duration_since(p.started) >= PENDING_DEADLINE)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for idx in stale {
+            let Some(p) = self.outputs[idx].pending.take() else {
+                continue;
+            };
+            p.frame.destroy();
+            // The compositor may still believe it owns the buffer it was given
+            // and never send the release; a buffer we cannot know the state of
+            // must not be handed out again.
+            self.outputs[idx].buffer = None;
+            let name = self.outputs[idx].label().to_string();
+            self.outputs[idx].next_due = now + self.min_interval;
+            log::debug!(
+                "capture: {} {:?} frame {} never completed ({:.2} s); giving up on it",
+                name,
+                p.reason,
+                p.id,
+                p.started.elapsed().as_secs_f64()
+            );
+            // A background frame is a refresh nobody asked for; the next one is
+            // due in `min_interval` and there is nothing for the main loop to
+            // do about this one. A Toggle or Entered capture is someone
+            // waiting, and they have to be told.
+            if p.reason != CaptureReason::Background {
+                self.emit(Msg::CaptureFailed {
+                    output: name,
+                    reason: p.reason,
+                    error: format!(
+                        "the compositor did not finish the screencopy frame within {:?}",
+                        PENDING_DEADLINE
+                    ),
+                });
+            }
+        }
+    }
+
     /// Issue background captures for every idle, due output.
     fn schedule(&mut self) {
         if self.paused || self.manager.is_none() {
@@ -694,18 +776,30 @@ impl App {
         }
     }
 
-    /// Milliseconds until the next background capture becomes due (`-1` = never).
+    /// Milliseconds until the loop next has something to do — the earliest of
+    /// the background captures that become due and the pending frames that
+    /// become overdue (`-1` = nothing, sleep until wayland or the waker speaks).
+    ///
+    /// The deadlines are in here because `expire_pending` only runs when the
+    /// loop goes round: without them a wedged frame on the last active output
+    /// would leave `poll` with no timeout at all, and nothing would ever wake
+    /// up to notice.
     fn poll_timeout(&self) -> i32 {
-        if self.paused || self.manager.is_none() {
+        if self.manager.is_none() {
             return -1;
         }
         let now = Instant::now();
         let mut best: Option<Duration> = None;
         for o in &self.outputs {
-            if o.name.is_none() || o.pending.is_some() {
+            if o.name.is_none() {
                 continue;
             }
-            let d = o.next_due.saturating_duration_since(now);
+            let d = match &o.pending {
+                Some(p) => (p.started + PENDING_DEADLINE).saturating_duration_since(now),
+                // Paused, nothing is started, so only deadlines matter.
+                None if self.paused => continue,
+                None => o.next_due.saturating_duration_since(now),
+            };
             best = Some(match best {
                 Some(b) if b <= d => b,
                 _ => d,
@@ -1083,7 +1177,8 @@ fn thread_main(
             break;
         }
 
-        // 2. background captures that are due
+        // 2. frames the compositor never finished, then the captures that are due
+        app.expire_pending();
         app.schedule();
         app.publish_outputs();
 
@@ -1267,10 +1362,11 @@ mod tests {
     fn box_filter_averages_the_whole_block() {
         // 2x2 -> 1x1, must be the mean, not a corner sample (nearest neighbour
         // would give exactly one of the inputs).
-        let px = [(0, 0, 0), (100, 100, 100), (200, 200, 200), (255, 255, 255)];
+        let values = [0u32, 100, 200, 255];
+        let px = values.map(|v| (v as u8, v as u8, v as u8));
         let src = bgra(&px, 2, 2, 8);
         let out = convert_downscale(&src, 2, 2, 8, PixFmt::Bgra, false, 1, 1);
-        let mean = ((0 + 100 + 200 + 255) + 2) / 4; // rounded
+        let mean = (values.iter().sum::<u32>() + 2) / 4; // rounded
         assert_eq!(out, vec![mean as u8, mean as u8, mean as u8, 255]);
     }
 
@@ -1343,8 +1439,10 @@ mod tests {
         assert_eq!((w, h), (16, 8));
         let out = convert_downscale(&src, 64, 32, 64 * 4, PixFmt::Bgra, false, w, h);
         assert_eq!(out.len(), (w * h * 4) as usize);
-        assert!(out.chunks_exact(4).all(|p| p[3] == 255));
-        assert!(out.chunks_exact(4).all(|p| p[1] == 1 && p[2] == 2));
+        let (pixels, rest) = out.as_chunks::<4>();
+        assert!(rest.is_empty());
+        assert!(pixels.iter().all(|p| p[3] == 255));
+        assert!(pixels.iter().all(|p| p[1] == 1 && p[2] == 2));
     }
 
     #[test]

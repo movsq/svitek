@@ -59,18 +59,30 @@ impl Snapshot {
     }
 }
 
-/// True when `old` and `new` describe the *same* rows and differ at most in the
-/// focus/visibility flags (`WorkspaceInfo::focused`, `WorkspaceInfo::visible`
-/// and `WindowInfo::focused`).
+/// True when `old` and `new` describe the *same rows*: the same workspaces, in
+/// the same order, holding the same windows (same ids, same order, same
+/// `app_id`). Everything that is left — the focus/visibility flags
+/// (`WorkspaceInfo::focused`, `WorkspaceInfo::visible`, `WindowInfo::focused`)
+/// and the window *titles* — the panel can apply to the widgets it already has.
 ///
-/// This is what tells the panel that it may repaint CSS classes in place
-/// instead of rebuilding the rows. It matters because the hover preview *is* a
-/// real workspace switch: while the panel is up, every preview makes sway emit
-/// a focus change, and rebuilding the rows for it would destroy the very widget
-/// the pointer is sitting on — GTK then synthesizes a new enter on the
-/// replacement widget, which would preview again, in a loop. Anything else (a
-/// workspace appearing, vanishing, being renamed, a window opening, closing or
-/// retitled) is a structural change and still rebuilds.
+/// This is what tells the panel that it may repaint CSS classes and retype the
+/// title labels in place instead of rebuilding the rows. It matters because the
+/// hover preview *is* a real workspace switch: while the panel is up, every
+/// preview makes sway emit a focus change, and rebuilding the rows for it would
+/// destroy the very widget the pointer is sitting on — GTK then synthesizes a
+/// new enter on the replacement widget, which would preview again, in a loop.
+///
+/// A title is in the in-place set for the same reason, and it is the one that
+/// bites in ordinary use: a terminal running `top` on a visible workspace
+/// retitles itself once a second, and treating that as structural would cancel
+/// the pending preview and disarm hovering under the user's pointer while they
+/// were still choosing. The title only ever changes what one label *says*, and
+/// `ui::Panel::apply_flags` says it.
+///
+/// Anything else is structural and still rebuilds: a workspace appearing,
+/// vanishing, being renamed or moving output, a window opening or closing, the
+/// windows changing order, or a window changing `app_id` (a row's second label
+/// exists only for a window that has one, so that is a different widget tree).
 pub fn flags_only_change(old: &[WorkspaceInfo], new: &[WorkspaceInfo]) -> bool {
     old.len() == new.len()
         && old.iter().zip(new).all(|(a, b)| {
@@ -82,7 +94,7 @@ pub fn flags_only_change(old: &[WorkspaceInfo], new: &[WorkspaceInfo]) -> bool {
                 && a.windows
                     .iter()
                     .zip(&b.windows)
-                    .all(|(x, y)| x.id == y.id && x.title == y.title && x.app_id == y.app_id)
+                    .all(|(x, y)| x.id == y.id && x.app_id == y.app_id)
         })
 }
 
@@ -277,6 +289,38 @@ mod tests {
         assert!(flags_only_change(&before, &after));
     }
 
+    /// The one that keeps hover and the wheel usable: a terminal running `top`
+    /// retitles itself once a second, and a rebuild for that would cancel the
+    /// pending preview and disarm hovering under a pointer that never moved.
+    /// Same rows, same windows — only what a label *says* changed.
+    #[test]
+    fn a_retitled_window_is_a_flags_only_change() {
+        let before = two();
+        let mut after = two();
+        after[0].windows[0].title = "top - 14:02:11".to_string();
+        assert_ne!(before, after, "the snapshots really do differ");
+        assert!(flags_only_change(&before, &after));
+
+        // Including the empty title the panel renders as "(untitled)", in both
+        // directions, and on a window that is not the focused one.
+        let mut blanked = two();
+        blanked[1].windows[0].title = String::new();
+        assert!(flags_only_change(&before, &blanked));
+        assert!(flags_only_change(&blanked, &before));
+
+        // And together with the focus flags a preview flips, which is what an
+        // actual `Msg::State` after a preview of a busy workspace looks like.
+        let mut both = two();
+        both[0].focused = false;
+        both[0].visible = false;
+        both[0].windows[0].focused = false;
+        both[0].windows[0].title = "top - 14:02:12".to_string();
+        both[1].focused = true;
+        both[1].visible = true;
+        both[1].windows[0].focused = true;
+        assert!(flags_only_change(&before, &both));
+    }
+
     #[test]
     fn structural_changes_still_rebuild() {
         let before = two();
@@ -284,10 +328,6 @@ mod tests {
         let mut renamed = two();
         renamed[1].name = "web".to_string();
         assert!(!flags_only_change(&before, &renamed));
-
-        let mut retitled = two();
-        retitled[1].windows[0].title = "CHARLIE".to_string();
-        assert!(!flags_only_change(&before, &retitled));
 
         let mut window_gone = two();
         window_gone[1].windows.clear();
@@ -304,6 +344,14 @@ mod tests {
         let mut app_id_changed = two();
         app_id_changed[0].windows[0].app_id = None;
         assert!(!flags_only_change(&before, &app_id_changed));
+
+        // Same ids, different order: the labels would end up on the wrong rows
+        // if this were applied in place.
+        let mut reordered = two();
+        reordered[0].windows.push(win(11, "DELTA", false));
+        let mut swapped = reordered.clone();
+        swapped[0].windows.swap(0, 1);
+        assert!(!flags_only_change(&reordered, &swapped));
 
         let mut ws_added = two();
         ws_added.push(ws(3, "3", false, false, vec![]));

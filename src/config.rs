@@ -2,8 +2,15 @@
 //! reason. Missing file or missing keys => defaults; a malformed file is an
 //! error printed at start (and defaults are used).
 //!
+//! Values that have a range are clamped to it by `load` (once, so the panel and
+//! the capture thread cannot end up with different numbers) and the clamp is
+//! reported on stderr.
+//!
 //! ```toml
-//! # Width of the thumbnails in pixels; height follows the output's aspect ratio.
+//! # Width of the thumbnails in pixels; height follows the output's aspect
+//! # ratio. Clamped to 80..=1000: below that the picture says nothing, above it
+//! # a strip of cards is wider than any screen and every capture costs more to
+//! # downscale than the thumbnail is worth.
 //! thumbnail_width = 240
 //! # Where the panel sits: "center" (default) lays the workspaces out side by
 //! # side in the middle of the screen; "left" / "right" stack them in a
@@ -33,11 +40,20 @@
 //! ```
 
 use serde::Deserialize;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
+
+/// What `thumbnail_width` may be. The low end is where a thumbnail stops
+/// telling you anything; the high end is past any real output, and every
+/// capture pays for the downscale. `load` clamps into this, so `ui` and the
+/// capture thread are laying out and rendering the same number of pixels.
+pub const THUMBNAIL_WIDTH: RangeInclusive<u32> = 80..=1000;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
+    /// Thumbnail width in px, within `THUMBNAIL_WIDTH` — `load` is what
+    /// guarantees that, so anything built by hand has to clamp for itself.
     pub thumbnail_width: u32,
     pub position: Position,
     pub close_on_select: bool,
@@ -112,7 +128,21 @@ pub fn config_path() -> Option<PathBuf> {
 
 /// Load the config, falling back to defaults. Returns `(config, Some(error))`
 /// when the file existed but could not be parsed.
+///
+/// This is the single place a configured value is brought into range: a clamp
+/// is not an error (the panel runs perfectly well on the nearest legal value),
+/// so it is reported on stderr — where the user will see it without setting
+/// `RUST_LOG` — and the config that comes back is already correct for every
+/// consumer.
 pub fn load() -> (Config, Option<String>) {
+    let (mut config, error) = read();
+    if let Some(notice) = sanitize(&mut config) {
+        eprintln!("svitek: config: {notice}");
+    }
+    (config, error)
+}
+
+fn read() -> (Config, Option<String>) {
     let Some(path) = config_path() else {
         return (Config::default(), None);
     };
@@ -130,6 +160,22 @@ pub fn load() -> (Config, Option<String>) {
             Some(format!("{}: {}", path.display(), e)),
         ),
     }
+}
+
+/// Bring every bounded value into range. Returns a one-line notice naming what
+/// had to change, or `None` when the config was already legal.
+fn sanitize(config: &mut Config) -> Option<String> {
+    let asked = config.thumbnail_width;
+    let clamped = asked.clamp(*THUMBNAIL_WIDTH.start(), *THUMBNAIL_WIDTH.end());
+    if clamped == asked {
+        return None;
+    }
+    config.thumbnail_width = clamped;
+    Some(format!(
+        "thumbnail_width {asked} is outside {}..={}; using {clamped}",
+        THUMBNAIL_WIDTH.start(),
+        THUMBNAIL_WIDTH.end()
+    ))
 }
 
 #[cfg(test)]
@@ -182,6 +228,43 @@ mod tests {
         let c: Config = toml::from_str("position = \"right\"\n").unwrap();
         assert_eq!(c.position, Position::Right);
         assert!(toml::from_str::<Config>("position = \"top\"\n").is_err());
+    }
+
+    /// The clamp the panel *and* the capture thread both depend on: they must
+    /// agree about how wide a thumbnail is, so it happens once, here, and not
+    /// in whichever consumer remembered to do it.
+    #[test]
+    fn thumbnail_width_is_clamped_with_a_notice() {
+        let mut c = Config {
+            thumbnail_width: 4000,
+            ..Config::default()
+        };
+        let notice = sanitize(&mut c).expect("a clamp is reported");
+        assert_eq!(c.thumbnail_width, *THUMBNAIL_WIDTH.end());
+        assert!(notice.contains("4000"), "{notice}");
+        assert!(notice.contains("1000"), "{notice}");
+
+        let mut c = Config {
+            thumbnail_width: 0,
+            ..Config::default()
+        };
+        assert!(sanitize(&mut c).is_some());
+        assert_eq!(c.thumbnail_width, *THUMBNAIL_WIDTH.start());
+
+        // In range: untouched, and nothing to say about it.
+        for w in [*THUMBNAIL_WIDTH.start(), 240, *THUMBNAIL_WIDTH.end()] {
+            let mut c = Config {
+                thumbnail_width: w,
+                ..Config::default()
+            };
+            assert_eq!(sanitize(&mut c), None);
+            assert_eq!(c.thumbnail_width, w);
+        }
+
+        // The default has to be legal without being clamped.
+        let mut d = Config::default();
+        assert_eq!(sanitize(&mut d), None);
+        assert_eq!(d, Config::default());
     }
 
     #[test]

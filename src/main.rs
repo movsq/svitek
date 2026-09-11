@@ -712,20 +712,39 @@ impl Ctx {
 /// process with `_exit(1)` when the Wayland connection drops, and `_exit` runs
 /// no `atexit` handler at all. That path is `install_wayland_death_watch`.
 ///
-/// The handler runs from `exit()`, not from a signal, so it is not held to
-/// async-signal-safety; it is kept to one `unlink(2)` anyway, on a path that
-/// was turned into a `CString` while the process was still healthy.
+/// Like every other cleanup it unlinks the path only while it still *is* the
+/// socket this process bound: `svitek quit; svitek` can have the successor
+/// bound and serving before our `exit()` gets this far, and an unconditional
+/// `unlink` would take the new daemon's socket with it, leaving a daemon
+/// running that no `svitek toggle` can reach. The `(st_dev, st_ino)` recorded
+/// at bind time (`control::socket_identity`) is what tells the two apart.
+///
+/// The handler runs from `exit()`, not from a signal, but `exit()` can be
+/// reached *from* one, so it is written to async-signal-safe rules anyway:
+/// two syscalls on a `CString` and a `stat` buffer built while the process was
+/// still healthy, no allocation, no locking, no formatting.
 fn install_socket_reaper() {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::sync::OnceLock;
 
-    static SOCKET: OnceLock<CString> = OnceLock::new();
+    static SOCKET: OnceLock<(CString, u64, u64)> = OnceLock::new();
 
     extern "C" fn reap() {
-        if let Some(path) = SOCKET.get() {
-            // Already gone (the normal paths remove it first) is the common
-            // case and not an error; there is no one left to tell anyway.
+        let Some((path, dev, ino)) = SOCKET.get() else {
+            return;
+        };
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `path` is a live NUL-terminated string and `st` is a live,
+        // correctly sized `stat` buffer. `lstat`, not `stat`: a symlink that
+        // appeared at the path is not our socket, whatever it points at.
+        if unsafe { libc::lstat(path.as_ptr(), st.as_mut_ptr()) } != 0 {
+            return; // gone already — the normal paths remove it first
+        }
+        // SAFETY: `lstat` returned 0, so it filled the buffer.
+        let st = unsafe { st.assume_init() };
+        if st.st_dev == *dev && st.st_ino == *ino {
+            // Nothing to do if this fails, and no one left to tell.
             unsafe { libc::unlink(path.as_ptr()) };
         }
     }
@@ -735,7 +754,11 @@ fn install_socket_reaper() {
         warn!("control socket path contains a NUL byte; not registering the exit handler");
         return;
     };
-    if SOCKET.set(c_path).is_err() {
+    let Some((dev, ino)) = control::socket_identity() else {
+        warn!("no control socket is bound; not registering the exit handler");
+        return;
+    };
+    if SOCKET.set((c_path, dev, ino)).is_err() {
         return; // already installed
     }
     if unsafe { libc::atexit(reap) } != 0 {

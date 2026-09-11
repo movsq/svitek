@@ -87,7 +87,20 @@ fn run(tx: Sender<Msg>) {
         // corrected before the new names show up in a `State`.
         if let Event::Workspace(ev) = &event {
             if ev.change == WorkspaceChange::Focus {
-                if let Some(current) = &ev.current {
+                // A focus event without a name is not something we can act on:
+                // the name *is* the workspace as far as svitek is concerned
+                // (thumbnail key, row identity, switch target), and `to == ""`
+                // would only make the main loop chase a workspace that does not
+                // exist. Sway always sends one; if it ever does not, skip just
+                // this message — the `State` that follows still arrives.
+                let named = ev
+                    .current
+                    .as_ref()
+                    .filter(|c| c.name.as_deref().is_some_and(|n| !n.is_empty()));
+                if ev.current.is_some() && named.is_none() {
+                    log::debug!("workspace focus event without a name; not announcing a switch");
+                }
+                if let Some(current) = named {
                     let to = current.name.clone().unwrap_or_default();
                     let output = current
                         .output
@@ -321,13 +334,26 @@ thread_local! {
     static COMMAND_CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
 }
 
-/// Switch to workspace `name` exactly like `swaymsg workspace <name>` would:
-/// numbered workspaces via `workspace number N`, others via a quoted name.
+/// Switch to workspace `name`, always as
+/// `workspace --no-auto-back-and-forth "<name>"` — one command for every
+/// workspace, numbered or not.
+///
+/// The name is the key svitek identifies a workspace by everywhere else (the
+/// thumbnail cache, the rows, the origin), `workspace <name>` finds a numbered
+/// workspace perfectly well, and going through `workspace number N` instead
+/// would name a *different* thing: `number 3` means "workspace 3 on this
+/// output, creating it if need be", where the row the user clicked is one
+/// specific existing workspace, possibly on another output. So `num` is
+/// deliberately unused here; it is carried this far only because
+/// `ui::WorkspaceFn` hands it over (see its doc).
+///
+/// `--no-auto-back-and-forth` is what keeps a preview from toggling: without
+/// it, switching to the workspace sway is already on would bounce to the
+/// previous one instead of staying put.
+///
 /// Moves focus to another output if the workspace lives there. Blocking but
 /// fast (one round trip); called from the GTK main loop on a row click.
 pub fn switch_to(name: &str, num: Option<i32>) -> Result<(), String> {
-    // The name is the stable key everywhere else, and `workspace <name>` also
-    // finds a numbered workspace, so `num` is not needed here.
     let _ = num;
     let cmd = format!(
         "workspace --no-auto-back-and-forth \"{}\"",
