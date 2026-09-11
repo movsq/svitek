@@ -219,7 +219,7 @@ focused    = "#89b4fa"     # border/marker of the focused workspace card
 
 * `RUST_LOG` — log level of the daemon, e.g. `RUST_LOG=svitek=debug svitek`.
 * `SVITEK_SOCKET` — override the control socket path (default
-  `$XDG_RUNTIME_DIR/svitek.sock`, or `/tmp/svitek-<uid>.sock` if
+  `$XDG_RUNTIME_DIR/svitek.sock`, or `/tmp/svitek-<uid>/svitek.sock` (a 0700 directory svitek creates) if
   `XDG_RUNTIME_DIR` is unset). Both the daemon and the client read it, so it is
   the way to run a second svitek against a second (e.g. nested or headless)
   sway without the two fighting over one socket.
