@@ -32,7 +32,7 @@
 //!     created its wl_pointer, and the process lingers ~600 ms so the click is
 //!     delivered before the seat loses the device.
 //!
-//! inject scroll <output> <x> <y> <steps>      (INJECT_NO_MOTION=1: no pointer motion first)
+//! inject scroll <output> <x> <y> <steps>
 //!     Same virtual pointer, moved to <x>,<y> first (so the wheel lands on
 //!     whatever is under that point — a row, the panel padding, or the scrim),
 //!     then |steps| mouse-wheel detents ~60 ms apart on the vertical axis.
@@ -43,7 +43,6 @@
 //!     click (value120) rather than a smooth scroll.
 //!
 //! inject key <evdev-code> [delay_ms] [xkb_mod_mask]
-//! inject keyhold <evdev-code> [delay_ms] [xkb_mod_mask]
 //!     Create a virtual keyboard (keymap compiled with `xkbcli compile-keymap
 //!     --layout us`, so libxkbcommon-tools must be installed), wait `delay_ms`,
 //!     then press+release the evdev key <evdev-code>. `delay_ms` exists so the
@@ -79,8 +78,9 @@
 //!       run:<command> run `sh -c <command>` and wait for it
 //! ```
 //!
-//! Every subcommand prints `inject: …` progress lines on success and exits 0;
-//! a missing protocol or a bad argument panics / exits non-zero.
+//! Every subcommand prints `inject: …` progress lines on success and exits 0.
+//! A missing or unparsable argument prints the usage text and exits 2; a
+//! missing Wayland protocol or a compositor that will not talk panics.
 
 use std::os::fd::AsFd;
 
@@ -104,7 +104,6 @@ struct State {
     pointer_mgr: Option<ZwlrVirtualPointerManagerV1>,
     keyboard_mgr: Option<ZwpVirtualKeyboardManagerV1>,
     outputs: Vec<(wl_output::WlOutput, Option<String>)>,
-    done: bool,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -224,8 +223,55 @@ fn now() -> u32 {
         .as_millis() as u32
 }
 
+/// The one place the command line is described; every bad-argument path ends
+/// here, so a typo gets the usage text and exit 2 rather than an index panic.
+fn usage() -> ! {
+    eprintln!(
+        "usage: inject pointer <output> <x> <y> [click]\n\
+         \x20      inject scroll <output> <x> <y> <steps>   (+ = wheel down)\n\
+         \x20      inject key <evdev-code> [delay_ms] [xkb_mod_mask]\n\
+         \x20      inject hold <mod-evdev-code|0> <xkb_mod_mask> <setup_ms>\n\
+         \x20          [key:<c>|sleep:<ms>|run:<cmd>]..."
+    );
+    std::process::exit(2);
+}
+
+/// Parse a positional argument, or explain which one is wrong and print usage.
+fn num<T: std::str::FromStr>(s: &str, what: &str) -> T {
+    s.parse().unwrap_or_else(|_| {
+        eprintln!("inject: <{what}> must be a number, got {s:?}");
+        usage()
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Check the shape of the command line before touching Wayland: a missing
+    // argument should say so, not panic somewhere deep in a subcommand.
+    let mode = args.get(1).map(|s| s.as_str()).unwrap_or_default();
+    let need = match mode {
+        "pointer" => 5, // prog pointer <output> <x> <y>
+        "scroll" => 6,  // prog scroll <output> <x> <y> <steps>
+        "key" => 3,     // prog key <evdev-code>
+        "hold" => 5,    // prog hold <mod-code> <mask> <setup_ms>
+        "" => {
+            eprintln!("inject: no subcommand");
+            usage()
+        }
+        other => {
+            eprintln!("inject: unknown subcommand {other:?}");
+            usage()
+        }
+    };
+    if args.len() < need {
+        eprintln!(
+            "inject: {mode} needs {} positional argument(s), got {}",
+            need - 2,
+            args.len().saturating_sub(2)
+        );
+        usage();
+    }
+
     let conn = Connection::connect_to_env().expect("connect");
     let mut queue = conn.new_event_queue::<State>();
     let qh = queue.handle();
@@ -233,28 +279,19 @@ fn main() {
     let mut st = State::default();
     queue.roundtrip(&mut st).unwrap();
     queue.roundtrip(&mut st).unwrap(); // output names
-    st.done = true;
-    let _ = st.done;
 
     let seat = st.seat.clone().expect("no wl_seat");
 
-    match args.get(1).map(|s| s.as_str()) {
-        Some(mode) if mode == "pointer" || mode == "scroll" => {
+    match mode {
+        "pointer" | "scroll" => {
             let scrolling = mode == "scroll";
             let target = args[2].clone();
-            let x: u32 = args[3].parse().unwrap();
-            let y: u32 = args[4].parse().unwrap();
-            let click = args.get(5).map(|s| s == "click").unwrap_or(false);
+            let x: u32 = num(&args[3], "x");
+            let y: u32 = num(&args[4], "y");
+            let click = !scrolling && args.get(5).map(|s| s == "click").unwrap_or(false);
             // `scroll` takes the number of detents where `pointer` takes
             // `click`; positive is wheel down / scroll away.
-            let steps: i32 = if scrolling {
-                args.get(5)
-                    .expect("scroll needs <steps>")
-                    .parse()
-                    .expect("steps must be an integer")
-            } else {
-                0
-            };
+            let steps: i32 = if scrolling { num(&args[5], "steps") } else { 0 };
             let mgr = st.pointer_mgr.clone().expect("no virtual pointer manager");
             let out = st
                 .outputs
@@ -275,22 +312,14 @@ fn main() {
 
             // Several motions: the first one may be delivered before the client
             // has created its wl_pointer, in which case it misses the enter.
-            // INJECT_NO_MOTION=1 skips the motion: the wheel then lands
-            // wherever sway's cursor already is, which is how a real user
-            // scrolls without moving the mouse first.
-            let motions = if std::env::var_os("INJECT_NO_MOTION").is_some() {
-                0
-            } else {
-                6
-            };
-            for i in 0..motions {
+            for i in 0..6 {
                 ptr.motion_absolute(now(), x + (i % 2), y, 1280, 720);
                 ptr.frame();
                 conn.flush().unwrap();
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }
 
-            if click && !scrolling {
+            if click {
                 const BTN_LEFT: u32 = 0x110;
                 ptr.button(
                     now(),
@@ -332,12 +361,12 @@ fn main() {
                 println!("inject: pointer done on {target} at {x},{y} click={click}");
             }
         }
-        Some("key") | Some("keyhold") => {
-            let code: u32 = args[2].parse().unwrap();
-            // keyhold: create the keyboard now, but only press the key after
+        "key" => {
+            let code: u32 = num(&args[2], "evdev-code");
+            // The keyboard is created now but the key only pressed after
             // `delay_ms`, so the seat already has keyboard capability (and sway
             // has settled its keyboard focus) before the panel is shown.
-            let delay_ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let delay_ms: u64 = args.get(3).map(|s| num(s, "delay_ms")).unwrap_or(0);
             use std::io::Write;
             let kb = keyboard(&mut st, &seat, &qh, &conn, &mut queue);
             println!("inject: virtual keyboard ready; waiting {delay_ms} ms");
@@ -346,7 +375,7 @@ fn main() {
 
             // args[4] (optional) = xkb modifier mask to hold while `code` is
             // pressed (Mod4/Super = 1 << 6 = 64), the way wtype does it.
-            let mods: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mods: u32 = args.get(4).map(|s| num(s, "xkb_mod_mask")).unwrap_or(0);
             if mods != 0 {
                 kb.modifiers(mods, 0, 0, 0);
                 conn.flush().unwrap();
@@ -365,10 +394,10 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(500));
             println!("inject: key {code} sent");
         }
-        Some("hold") => {
-            let mod_code: u32 = args[2].parse().expect("hold needs <mod-evdev-code|0>");
-            let mod_mask: u32 = args[3].parse().expect("hold needs <xkb_mod_mask>");
-            let setup_ms: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+        "hold" => {
+            let mod_code: u32 = num(&args[2], "mod-evdev-code");
+            let mod_mask: u32 = num(&args[3], "xkb_mod_mask");
+            let setup_ms: u64 = num(&args[4], "setup_ms");
             use std::io::Write;
             let kb = keyboard(&mut st, &seat, &qh, &conn, &mut queue);
             println!("inject: virtual keyboard ready; waiting {setup_ms} ms");
@@ -394,7 +423,7 @@ fn main() {
                 let (kind, rest) = action.split_once(':').unwrap_or((action.as_str(), ""));
                 match kind {
                     "key" => {
-                        let code: u32 = rest.parse().expect("key:<evdev-code>");
+                        let code: u32 = num(rest, "key:<evdev-code>");
                         kb.key(now(), code, PRESSED);
                         conn.flush().unwrap();
                         std::thread::sleep(std::time::Duration::from_millis(60));
@@ -403,7 +432,7 @@ fn main() {
                         println!("inject: key {code} tapped");
                     }
                     "sleep" => {
-                        let ms: u64 = rest.parse().expect("sleep:<ms>");
+                        let ms: u64 = num(rest, "sleep:<ms>");
                         std::thread::sleep(std::time::Duration::from_millis(ms));
                     }
                     "run" => {
@@ -414,7 +443,10 @@ fn main() {
                             .expect("sh");
                         println!("inject: ran {rest:?} -> {status}");
                     }
-                    _ => panic!("unknown action {action:?}"),
+                    _ => {
+                        eprintln!("inject: unknown action {action:?}");
+                        usage();
+                    }
                 }
                 std::io::stdout().flush().unwrap();
             }
@@ -431,17 +463,7 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(600));
             println!("inject: modifier {mod_code} up");
         }
-        other => {
-            eprintln!(
-                "usage: inject pointer <output> <x> <y> [click]\n\
-                        inject scroll <output> <x> <y> <steps>   (+ = wheel down)\n\
-                        inject key|keyhold <evdev-code> [delay_ms] [xkb_mod_mask]\n\
-                        inject hold <mod-evdev-code|0> <xkb_mod_mask> <setup_ms>\n\
-                        \x20   [key:<c>|sleep:<ms>|run:<cmd>]..."
-            );
-            eprintln!("got {other:?}");
-            std::process::exit(2);
-        }
+        _ => usage(), // already rejected above
     }
 }
 
@@ -465,13 +487,19 @@ fn keyboard(
     let keymap = std::process::Command::new("xkbcli")
         .args(["compile-keymap", "--layout", "us"])
         .output()
-        .expect("xkbcli");
-    let mut file = tempfile();
-    use std::io::{Seek, Write};
-    file.write_all(&keymap.stdout).unwrap();
-    file.write_all(&[0]).unwrap();
-    file.flush().unwrap();
-    file.rewind().unwrap();
+        .unwrap_or_else(|e| {
+            eprintln!("inject: cannot run xkbcli (install libxkbcommon-tools): {e}");
+            std::process::exit(2);
+        });
+    if !keymap.status.success() {
+        eprintln!(
+            "inject: xkbcli compile-keymap --layout us failed ({})",
+            keymap.status
+        );
+        eprint!("{}", String::from_utf8_lossy(&keymap.stderr));
+        std::process::exit(2);
+    }
+    let file = keymap_memfd(&keymap.stdout);
     kb.keymap(1, file.as_fd(), (keymap.stdout.len() + 1) as u32);
     conn.flush().unwrap();
     queue.roundtrip(st).unwrap();
@@ -479,16 +507,26 @@ fn keyboard(
     kb
 }
 
-fn tempfile() -> std::fs::File {
-    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-    let path = format!("{dir}/svitek-inject-keymap-{}", std::process::id());
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .unwrap();
-    let _ = std::fs::remove_file(&path);
+/// The keymap has to reach sway as a file descriptor it can mmap. An anonymous
+/// memfd is the whole of it: nothing is ever created in the filesystem, so
+/// there is no name to collide, no symlink to follow and nothing to clean up.
+/// (The main crate does the same for its screencopy buffers.)
+fn keymap_memfd(keymap: &[u8]) -> std::fs::File {
+    use std::io::{Seek, Write};
+    use std::os::fd::FromRawFd;
+
+    let name = c"svitek-inject-keymap";
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        eprintln!("inject: memfd_create: {}", std::io::Error::last_os_error());
+        std::process::exit(2);
+    }
+    let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+    // NUL-terminated: the keymap format wants the trailing byte, and the size
+    // handed to `keymap` below counts it.
+    f.write_all(keymap).unwrap();
+    f.write_all(&[0]).unwrap();
+    f.flush().unwrap();
+    f.rewind().unwrap();
     f
 }
