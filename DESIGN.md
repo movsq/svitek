@@ -6,7 +6,7 @@ compositor. Rust + gtk4 + gtk4-layer-shell + swayipc + wlr-screencopy.
 ## Process model
 
 One resident process (`svitek`, started by `exec` in the sway config).
-`svitek toggle` (bound to Mod+A) is a tiny client that writes one line
+`svitek toggle` (bound to `$mod+Tab`) is a tiny client that writes one line
 (`toggle` | `show` | `hide` | `next` | `prev` | `quit`) to the
 unix socket `$XDG_RUNTIME_DIR/svitek.sock` and exits. Cold start only happens
 once, from the sway config.
@@ -126,14 +126,14 @@ covering is the one that just became visible.
   A step counts from the pending preview if one is waiting out its debounce,
   else from `previewed`, so hover and wheel can never disagree: whichever acted
   last is what the next step moves from, and four quick steps land four rows
-  away instead of one. Hold-mode Mod+Tab and `svitek next|prev` move the same
+  away instead of one. Hold-mode `$mod+Tab` and `svitek next|prev` move the same
   selection through the same `step_selection`, with one difference: they
   **wrap** (`wrap_step`, next to `clamp_step` and unit-tested beside it). A key
   you tap repeatedly is a cycle — stopping dead at the last workspace would put
   half the list out of reach — where a wheel spin is not a count, and clamping
   is what keeps it from overshooting. They also ignore `PREVIEW_GRACE`: it is
   there for pointer and wheel events that were in flight when the surface
-  mapped, and a second Mod+Tab 80 ms after the first is not one of those.
+  mapped, and a second `$mod+Tab` 80 ms after the first is not one of those.
 * **The wheel controller is on the window, in the CAPTURE phase, and always
   claims the event.** A step on the scrim has to work (the scrim is the window's
   child, so a window-level controller covers the whole surface), and the
@@ -177,7 +177,8 @@ covering is the one that just became visible.
   CAPTURE-phase key controller as Esc, for the same reason: a focused child must
   not get to swallow it first.
 * **`mode = "hold"` is the alt-tab reading of the whole panel.** The same
-  widgets, three differences, all of them about who ends the gesture:
+  widgets, four differences: three about who ends the gesture, and one about
+  how it starts.
   1. Sway resolves `bindsym $mod+Tab` itself and swallows the combination, so
      **the panel never sees the Tab** — what it sees is another `svitek toggle`
      on the control socket. `main.rs` therefore reads `Command::Toggle` while
@@ -185,16 +186,17 @@ covering is the one that just became visible.
      hide. That is why hold mode is a *config* key and not a key binding: the
      daemon cannot tell the two presses apart any other way.
   2. **Releasing the modifier commits** — Super/Alt/Ctrl/Meta/Hyper, left or
-     right, and deliberately not Shift, which is held for the Mod+Shift+Tab that
-     goes backwards. The panel holds exclusive keyboard focus, so that release
-     is delivered to it; the handler is a `key-released` on the same
-     CAPTURE-phase controller as Esc and Enter, and it calls the same
+     right, and deliberately not Shift, which is held for the
+     `$mod+Shift+Tab` that goes backwards. The panel holds exclusive keyboard
+     focus, so that release is delivered to it; the handler is a
+     `key-released` on the same CAPTURE-phase controller as Esc and Enter,
+     and it calls the same
      `commit_selection` Enter does. Because that prefers the *pending* target
      over the previewed one, a release inside the 120 ms debounce still commits
      where the user was going.
-  3. **The tap that is over too soon.** On a fast Mod+Tab the modifier can be up
-     before the layer surface has keyboard focus at all, so no release event
-     will ever arrive and the panel would hang there. The first moment the
+  3. **The tap that is over too soon.** On a fast `$mod+Tab` the modifier can
+     be up before the layer surface has keyboard focus at all, so no release
+     event will ever arrive and the panel would hang there. The first moment the
      question can be answered is `wl_keyboard.enter`, which carries the modifier
      state and shows up here as the window going active: `is_active_notify`
      asks the seat keyboard for `modifier_state()` once per showing, and a panel

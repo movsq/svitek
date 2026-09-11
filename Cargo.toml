@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT"
 description = "svitek (Czech: scroll) — a Sway workspace switcher panel with thumbnails"
 repository = "https://github.com/movsq/svitek"
+readme = "README.md"
+keywords = ["sway", "wayland", "wlroots", "workspace", "gtk4"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 swayipc = "4"

@@ -5,12 +5,18 @@ one resident process that pops a strip of workspace cards over the middle of the
 focused output, each card a thumbnail of that workspace and the window titles on
 it.
 
+<!-- screenshot: docs/screenshot-center.png, the centered strip over a real
+     session; and docs/screenshot-left.png for the column `position = "left"`
+     gives. Once they exist, drop the comment and use:
+     ![svitek: the centered card strip](docs/screenshot-center.png) -->
+
 ## What it does
 
-* `Mod+A` toggles the panel. It appears in the middle of the output that has
-  focus, and lists the workspaces of that output only — one card per workspace,
-  side by side, `[ws1] [ws2] [ws3]`, where the eyes already are. If there are
-  more workspaces than fit across the screen the strip scrolls sideways rather
+* `$mod+Tab` — or whatever you bind `svitek toggle` to — toggles the panel. It
+  appears in the middle of the output that has focus, and lists the workspaces
+  of that output only — one card per workspace, side by side,
+  `[ws1] [ws2] [ws3]`, where the eyes already are. If there are more
+  workspaces than fit across the screen the strip scrolls sideways rather
   than shrinking the thumbnails. Set `position = "left"` (or `"right"`) in the
   config for the alternative: a full-height column pinned to that edge, one row
   per workspace, with room for more window titles beside each thumbnail.
@@ -38,16 +44,16 @@ it.
   (or are hovering). If you would rather use the panel to walk through several
   workspaces in one showing, set `close_on_select = false`: a click then switches
   but leaves the panel up, the focus marker moves to that card or row, and previews start
-  from there — `Enter` still closes. `Esc`, `Mod+A` again, or a click anywhere
-  outside the panel hides it and **puts you back on the active workspace** — the
-  one you opened it from, or, with `close_on_select = false`, the last one you
+  from there — `Enter` still closes. `Esc`, the toggle key again, or a click
+  anywhere outside the panel hides it and **puts you back on the active
+  workspace** — the one you opened it from, or, with `close_on_select = false`, the last one you
   clicked — whatever you previewed in between. So looking around costs nothing,
   and the only way to end up somewhere new is to click a workspace or press `Enter`.
   That dismissing click is swallowed: svitek's surface covers the whole output,
   so closing the panel never also clicks the window behind it. The catch on a
   multi-output setup is that the surface covers only the output the panel is on
   — a click on another screen does not close the panel (it does move sway's
-  focus there); `Esc` and `Mod+A` work from anywhere.
+  focus there); `Esc` and the toggle key work from anywhere.
 * **`mode = "hold"` turns all of that into alt-tab.** With it, the key that
   opens the panel keeps working while the panel is up: every further press
   steps the selection one workspace on — round to the first again after the
@@ -107,29 +113,32 @@ This is a deliberate compromise, not a bug.
 
 ## Build & install
 
+Build dependencies: a Rust toolchain (stable), `pkg-config`, and the
+development packages of gtk4 ≥ 4.18 and gtk4-layer-shell ≥ 1.3 — on Arch that
+is `gtk4 gtk4-layer-shell`, on Debian/Ubuntu `libgtk-4-dev` and
+`libgtk4-layer-shell-dev`.
+
+```sh
+cargo install --path .          # into ~/.cargo/bin
+```
+
+or, if you would rather place the binary yourself:
+
 ```sh
 cargo build --release
 cp target/release/svitek ~/.local/bin/
 ```
 
-Runtime dependencies: gtk4 ≥ 4.18, gtk4-layer-shell ≥ 1.3, and sway (or another
-wlroots compositor) exposing `wlr-screencopy-unstable-v1`. Without screencopy
-svitek refuses to start — thumbnails are the whole point.
+`tools/inject/` is a test-only crate with its own `Cargo.toml`, deliberately
+not part of this package: `cargo build` here never builds it (see
+[Testing](#testing)).
+
+Runtime dependencies: gtk4 ≥ 4.18, gtk4-layer-shell ≥ 1.3, and sway — svitek
+speaks sway's IPC and nothing else, and is tested on sway 1.12. It also needs
+`wlr-screencopy-unstable-v1`, which sway provides; without screencopy svitek
+refuses to start, because thumbnails are the whole point.
 
 ## Sway config
-
-```
-exec svitek
-bindsym $mod+a exec svitek toggle
-```
-
-Note that `$mod+a` is `focus parent` in sway's default config. The last
-`bindsym` for a key wins, so put the svitek binding *after* the defaults (after
-any `include`), move `focus parent` to another key if you use it, or bind svitek
-to something else entirely.
-
-For the alt-tab shape of the same thing, set `mode = "hold"` in the config and
-bind the toggle to a key you press *with* a modifier:
 
 ```
 exec svitek
@@ -137,30 +146,39 @@ bindsym $mod+Tab exec svitek toggle
 bindsym $mod+Shift+Tab exec svitek prev
 ```
 
+Any key will do — `$mod+Tab` is only the one this was written for. If you
+prefer `$mod+a`, note that it is `focus parent` in sway's default config: the
+last `bindsym` for a key wins, so put the svitek binding *after* the defaults
+(after any `include`), or move `focus parent` somewhere else.
+
+For the alt-tab shape of the same thing, set `mode = "hold"` in the config and
+keep the bindings above — a modifier you hold, plus a key you tap.
+
 Hold `$mod`, tap `Tab` to open the panel with the next workspace already
 selected (so a quick tap is a switch, the way alt-tab is), tap it again for each
 further workspace, and let go of `$mod` to land there. Set
 `hold_selects_next = false` if you would rather the first press only opened the
-panel. Sway resolves the
-binding itself, so the panel never sees the `Tab` at all — every press arrives
-as another `svitek toggle`, which in this mode means "one workspace on" rather
-than "close". Any of Super, Alt, Ctrl, Meta or Hyper works as the held key
-(Shift does not count, so `$mod+Shift+Tab` can go backwards without committing
-when you let Shift go).
+panel. Sway resolves the binding itself, so the panel never sees the `Tab` at
+all — every press arrives as another `svitek toggle`, which in this mode means
+"one workspace on" rather than "close". Any of Super, Alt, Ctrl, Meta or Hyper
+works as the held key (Shift does not count, so `$mod+Shift+Tab` can go
+backwards without committing when you let Shift go).
 
 ## Commands
 
 | command | what it does |
 |---|---|
-| `svitek` | run the resident panel (this is what `exec` starts) |
+| `svitek` | run the panel daemon (put `exec svitek` in your sway config) |
 | `svitek toggle` | show the panel, or hide it if it is up |
-| `svitek show` / `svitek hide` | one direction only |
-| `svitek next` / `svitek prev` | show the panel, or — if it is already up — move the selection one workspace on/back (wrapping) and preview it |
-| `svitek quit` | stop the resident process |
-| `svitek --help` / `svitek --version` | |
+| `svitek show` / `svitek hide` | show the panel / hide the panel |
+| `svitek next` | show the panel, or step the selection one workspace on (wrapping) and preview it |
+| `svitek prev` | the same, one workspace back |
+| `svitek quit` | stop the running daemon |
+| `svitek --help` / `svitek --version` | print the usage text / the version, and exit |
 
-Everything but the bare `svitek` is a one-line message to the running process;
-if none is running the client says so and exits 1.
+`--help` and `--version` are answered by the client itself. Every other
+argument is a one-line message to the running daemon; if none is running the
+client says so and exits 1.
 
 ## Configuration
 
@@ -170,7 +188,7 @@ reported on stderr at start and the defaults are used.
 
 ```toml
 # Width of the thumbnails in pixels; height follows the output's aspect ratio.
-# In the centered layout this is also the width of a card.
+# In the centered layout this is also the width of a card. (clamped to 80–1000)
 thumbnail_width = 240
 # Where the panel sits: "center" (default) is a horizontal strip of cards in the
 # middle of the output; "left" and "right" are a full-height column pinned to
@@ -205,6 +223,11 @@ focused    = "#89b4fa"     # border/marker of the focused workspace card
   `XDG_RUNTIME_DIR` is unset). Both the daemon and the client read it, so it is
   the way to run a second svitek against a second (e.g. nested or headless)
   sway without the two fighting over one socket.
+* `SWAYSOCK` — which sway svitek talks to. swayipc reads `I3SOCK` first, and a
+  shell pointed at a nested sway usually still carries the outer session's
+  `I3SOCK`, so svitek copies `SWAYSOCK` over `I3SOCK` as the first thing it
+  does (near the top of `main` in `src/main.rs`). Setting `SWAYSOCK` is
+  therefore enough to aim it at a particular compositor.
 
 ## Testing
 
@@ -214,14 +237,27 @@ grabs the keyboard while it is half-implemented is unpleasant to escape.
 exactly this:
 
 ```sh
-eval "$(tests/headless-sway.sh start)"   # exports SWAYSOCK, WAYLAND_DISPLAY, SVITEK_TEST_DIR
 export SVITEK_SOCKET=$XDG_RUNTIME_DIR/svitek-test.sock
+eval "$(tests/headless-sway.sh start)"   # exports SWAYSOCK, WAYLAND_DISPLAY, SVITEK_TEST_DIR
 cargo run                                # against the headless sway only
 tests/headless-sway.sh stop
 ```
 
-Use `SVITEK_TEST_DIR` to keep parallel headless instances apart. The unit tests
-(`cargo test`) need no compositor at all.
+Two variables have to be exported *before* `start`, because the script reads
+them while it writes the nested sway's config:
+
+* `SVITEK_TEST_DIR` — where that config, the sway log and the pid file go
+  (default `$XDG_RUNTIME_DIR/svitek-test`). Export your own to keep parallel
+  headless instances apart; the script echoes the value back among the exports
+  either way, so `stop` finds the same directory.
+* `SVITEK_BIN` — path to a svitek binary. With it set, the generated config
+  gets a real `bindsym $mod+Tab exec <it> toggle` (and `$mod+Shift+Tab` for
+  `prev`), so hold mode can be driven through sway's own key handling rather
+  than through the control socket. Sway's `exec` inherits sway's
+  environment, so `SVITEK_SOCKET` must be exported before `start` too for that
+  binding to reach the test daemon.
+
+The unit tests (`cargo test`) need no compositor at all.
 
 `tests/e2e.sh` does the whole thing unattended — headless sway, build, daemon,
 toggle/show/hide/quit, the 1 → 2 → back-to-1 thumbnail check (a pixel test on
@@ -231,14 +267,27 @@ marker lands on screen, a click outside it, a wheel step to the next card) and,
 with `mode = "hold"`, the whole alt-tab gesture driven through a real
 `bindsym $mod+Tab` in the nested sway (stepping, wrapping, `next`/`prev`,
 committing on the release of Super, and the race where Super is already up
-before the panel maps) — and exits non-zero if anything fails. It needs `foot`, `grim` and
-either python3 + PIL or ImageMagick. `tools/inject/` is a separate test-only
-crate that fakes pointer motion, clicks, wheel steps and key presses on the
-headless seat, which has no input devices; see the comment at the top of
+before the panel maps) — and exits non-zero if anything fails. It builds the
+crate itself, so the build dependencies above apply on top of: `sway`, `foot`,
+`grim`, `setsid` (util-linux), `xkbcli` (libxkbcommon-tools — the injector
+compiles the virtual keyboard's keymap with it), and either python3 + PIL or
+ImageMagick 7 for the pixel checks (the binary is called `magick`; version 6's
+`convert` is not used). `tools/inject/` is a separate test-only crate that
+fakes pointer motion, clicks, wheel steps and key presses on the headless seat,
+which has no input devices; see the comment at the top of
 `tools/inject/src/main.rs`.
+
+The e2e test does not run on GitHub-hosted CI: it needs a compositor — sway
+itself, plus the Wayland stack and the tools above — which the hosted runners
+do not provide. `cargo test`, `cargo fmt --check` and `cargo clippy` are the
+parts that can run there.
 
 ## Non-goals (v0)
 
 No drag and drop of windows between workspaces, no reordering of workspaces, no
 layout control, no compositors other than sway, no animations. Ideas that keep
 coming back live in `TODO.md`; the design rationale lives in `DESIGN.md`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

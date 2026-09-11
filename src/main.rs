@@ -1,7 +1,7 @@
 //! svitek — a Sway workspace switcher panel.
 //!
 //! `svitek`            run the resident panel (from `exec` in the sway config)
-//! `svitek toggle`     tell the running instance to toggle (bind this to Mod+A)
+//! `svitek toggle`     tell the running instance to toggle (bind this to a key)
 //! `svitek show|hide|next|prev|quit`
 
 mod capture;
@@ -43,8 +43,8 @@ usage:
   svitek toggle       show the panel, or hide it if it is up (bind this to a key)
   svitek show         show the panel
   svitek hide         hide the panel
-  svitek next         show the panel, or step the selection one workspace on
-  svitek prev         the same, one workspace back (bind it to Mod+Shift+Tab)
+  svitek next         show the panel, or step the selection one workspace on (wrapping)
+  svitek prev         the same, one workspace back (bind it to $mod+Shift+Tab)
   svitek quit         stop the running daemon
   svitek --help       this text
   svitek --version    print the version
