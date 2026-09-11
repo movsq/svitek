@@ -2,7 +2,7 @@
 //!
 //! `svitek`            run the resident panel (from `exec` in the sway config)
 //! `svitek toggle`     tell the running instance to toggle (bind this to Mod+A)
-//! `svitek show|hide|quit`
+//! `svitek show|hide|next|prev|quit`
 
 mod capture;
 mod config;
@@ -43,6 +43,8 @@ usage:
   svitek toggle       show the panel, or hide it if it is up (bind this to a key)
   svitek show         show the panel
   svitek hide         hide the panel
+  svitek next         show the panel, or step the selection one workspace on
+  svitek prev         the same, one workspace back (bind it to Mod+Shift+Tab)
   svitek quit         stop the running daemon
   svitek --help       this text
   svitek --version    print the version
@@ -274,6 +276,8 @@ fn activate(
         panel,
         capturer,
         app: app.clone(),
+        mode: config.mode,
+        hold_selects_next: config.hold_selects_next,
     };
 
     glib::spawn_future_local(async move {
@@ -294,6 +298,11 @@ fn activate(
 struct PendingShow {
     output: String,
     fallback: Option<glib::SourceId>,
+    /// Steps asked for before the panel was even up. A second Mod+Tab can
+    /// easily arrive inside the ~60 ms a show waits for its fresh frame, and
+    /// dropping it would lose a keypress the user made; it is applied by
+    /// `do_show` the moment the panel appears.
+    steps: i32,
 }
 
 impl PendingShow {
@@ -330,6 +339,12 @@ struct Ctx {
     panel: Rc<ui::Panel>,
     capturer: Capturer,
     app: gtk4::Application,
+    /// `config.mode`: the one thing that makes `Command::Toggle` mean
+    /// something different here (a step, not a hide).
+    mode: config::Mode,
+    /// `config.hold_selects_next`: in hold mode, whether the press that opens
+    /// the panel already counts as a step.
+    hold_selects_next: bool,
 }
 
 impl Ctx {
@@ -461,6 +476,12 @@ impl Ctx {
             Msg::CaptureOutputs(outputs) => info!("capture outputs: {}", outputs.join(", ")),
 
             Msg::Control(cmd) => match cmd {
+                // In hold mode the binding is alt-tab, not a switch: sway
+                // consumes Mod+Tab itself and runs the binding again, so a
+                // second press reaches us as a second `toggle` and means "one
+                // workspace on", never "close". Letting go of the modifier is
+                // what closes it (ui.rs), and Esc / `hide` still do too.
+                Command::Toggle if self.mode == config::Mode::Hold => self.step(1),
                 Command::Toggle => {
                     if self.is_visible() || self.state.borrow().pending_show.is_some() {
                         self.hide();
@@ -476,6 +497,10 @@ impl Ctx {
                     }
                 }
                 Command::Hide => self.hide(),
+                // Explicit stepping, in both modes: bind `prev` to
+                // Mod+Shift+Tab next to a `toggle` or `next` on Mod+Tab.
+                Command::Next => self.step(1),
+                Command::Prev => self.step(-1),
                 Command::Quit => {
                     info!("quit requested");
                     self.shutdown();
@@ -535,7 +560,7 @@ impl Ctx {
                 let pending = ctx.state.borrow_mut().pending_show.take();
                 if let Some(p) = pending {
                     debug!("toggle: no frame within {SHOW_FALLBACK:?}, showing anyway");
-                    ctx.do_show(p.output);
+                    ctx.do_show(p.output, p.steps);
                 }
             })
         };
@@ -543,7 +568,45 @@ impl Ctx {
         self.state.borrow_mut().pending_show = Some(PendingShow {
             output,
             fallback: Some(fallback),
+            steps: 0,
         });
+    }
+
+    /// Move the selection `steps` workspaces on (wrapping), showing the panel
+    /// first if it is down — `svitek next|prev`, and hold mode's Mod+Tab.
+    ///
+    /// The three states the panel can be in each answer differently: up, step
+    /// it; still waiting for its first frame, queue the step (cancelling the
+    /// show instead would swallow the keypress); down, this is a show — and in
+    /// hold mode with `hold_selects_next` the opening press is itself the first
+    /// step, the alt-tab convention, so a quick Mod+Tab tap lands on the next
+    /// workspace. Otherwise the selection starts on the workspace the user is
+    /// already on and the first press only opens the panel.
+    fn step(&self, steps: i32) {
+        if self.is_visible() {
+            self.panel.step(steps);
+            return;
+        }
+        let queued = match self.state.borrow_mut().pending_show.as_mut() {
+            Some(p) => {
+                p.steps += steps;
+                true
+            }
+            None => false,
+        };
+        if queued {
+            debug!("step {steps:+} queued behind the pending show");
+            return;
+        }
+        self.begin_show();
+        if self.mode == config::Mode::Hold && self.hold_selects_next {
+            // `begin_show` may have declined (no output); only then is there
+            // no pending show to hang the step on.
+            if let Some(p) = self.state.borrow_mut().pending_show.as_mut() {
+                debug!("hold mode: the opening press is the first step ({steps:+})");
+                p.steps = steps;
+            }
+        }
     }
 
     /// The fresh frame for a pending show landed (or failed): show now.
@@ -557,10 +620,12 @@ impl Ctx {
         if let Some(id) = p.fallback {
             id.remove();
         }
-        self.do_show(p.output);
+        self.do_show(p.output, p.steps);
     }
 
-    fn do_show(&self, output: String) {
+    /// Map the panel on `output`, then apply any steps that arrived while it
+    /// was still being prepared.
+    fn do_show(&self, output: String, steps: i32) {
         let (snapshot, thumbs) = {
             let st = self.state.borrow();
             (st.snapshot.clone(), st.thumbs.clone())
@@ -580,6 +645,10 @@ impl Ctx {
             st.shown_on = Some(output);
             st.preview_origin = origin;
             st.previewing = false;
+        }
+        if steps != 0 {
+            debug!("applying {steps:+} step(s) queued while the show was pending");
+            self.panel.step(steps);
         }
         // Once the surface is mapped, make sway re-evaluate what is under the
         // pointer (see `ipc::nudge_pointer`). Inside the panel's preview grace

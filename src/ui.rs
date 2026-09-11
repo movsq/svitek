@@ -31,11 +31,15 @@
 //! wheel does the same thing without the pointer: a step moves the *selection*
 //! one row down/up in the column layouts, one card right/left in the centered
 //! one (clamped, no wrap), and previews it.
-//! Hover and wheel share one notion of "what is being previewed right now"
+//! `Panel::step` is the same move without the wheel: one row on, wrapping —
+//! it is what hold mode's Mod+Tab and `svitek next|prev` come in on, and it
+//! shares `step_selection` with the wheel so there is one definition of moving
+//! the selection.
+//! Hover, wheel and Tab share one notion of "what is being previewed right now"
 //! (`Panel::previewed` plus the pending debounce), so whichever acted last is
-//! where the next wheel step counts from. The rules live in two halves: this
+//! where the next step counts from. The rules live in two halves: this
 //! module decides *when* (a 120 ms debounce, armed only by a real pointer
-//! motion after `show()`, or by a wheel step) and `main.rs` decides *what*
+//! motion after `show()`, or by a step) and `main.rs` decides *what*
 //! (whether a switch is needed, and undoing it unless the user committed).
 //! Enter always commits the selection: it marks the hide as a commit (so the
 //! preview is not reverted) and switches. A click on a row does the same thing
@@ -44,12 +48,22 @@
 //! into "go there and stay open" instead: the clicked row becomes the new
 //! origin, previews measure from it, and several workspaces can be visited in
 //! one showing. Both paths go through `Panel::commit`/`commit_is_a_plain_hide`,
-//! so there is exactly one definition of what committing means. While the panel
-//! is visible the rows are frozen: a focus change repaints CSS classes and
-//! never rebuilds, because rebuilding would destroy the row under the pointer
-//! and re-enter it.
+//! so there is exactly one definition of what committing means.
+//! With `mode = "hold"` one more gesture commits: **releasing the modifier**.
+//! The panel holds exclusive keyboard focus, so the Super the user is holding
+//! for their Mod+Tab binding sends its release here, and that does what Enter
+//! does. (The Tab itself never arrives — sway resolves the binding and swallows
+//! the combination — which is why a further Mod+Tab reaches us as another
+//! `svitek toggle` on the control socket, and why `main.rs` turns that into
+//! `Panel::step(1)` in hold mode.) A tap can be over before the surface has
+//! keyboard focus at all, so the modifier state is also checked once, when the
+//! window goes active, and a panel opened by a modifier that is already up
+//! commits at once instead of hanging there.
+//! While the panel is visible the rows are frozen: a focus change repaints CSS
+//! classes and never rebuilds, because rebuilding would destroy the row under
+//! the pointer and re-enter it.
 
-use crate::config::{Colors, Config, Position};
+use crate::config::{Colors, Config, Mode, Position};
 use crate::model::{flags_only_change, Snapshot, Thumbnail, WindowInfo, WorkspaceInfo};
 
 use gtk4::gdk;
@@ -117,10 +131,12 @@ pub type WorkspaceFn = Box<dyn Fn(&str, Option<i32>)>;
 
 /// What the panel asks the app to do.
 pub struct PanelCallbacks {
-    /// Switch to workspace (name, num) for good. Called on Enter, and on a row
-    /// click — in either of the two shapes a click can take:
+    /// Switch to workspace (name, num) for good. Called on Enter, on a hold-mode
+    /// modifier release, and on a row click — in either of the two shapes a
+    /// click can take:
     ///
-    /// * `close_on_select = true` (the default) and Enter: *after* the panel
+    /// * `close_on_select = true` (the default), Enter and the modifier
+    ///   release: *after* the panel
     ///   has hidden itself with `committed = true`, so the app sees `hidden`
     ///   first and this call second, with the panel already down.
     /// * `close_on_select = false`: while the panel stays open, with that
@@ -135,6 +151,7 @@ pub struct PanelCallbacks {
     /// The panel was hidden (Esc, click, or `hide()`); the app resumes captures.
     ///
     /// `committed` is true when the hide is the first half of a commit — Enter,
+    /// a hold-mode modifier release,
     /// or a row click with `close_on_select` (the default): the `switch` that
     /// follows is what the user asked for, so a preview in progress must *not*
     /// be reverted. It is false for every other way out (Esc, a click outside,
@@ -145,13 +162,16 @@ pub struct PanelCallbacks {
 }
 
 /// Where a pending preview came from. The pointer leaving a row cancels a
-/// *hover* debounce, but must not cancel one the wheel started: scrolling the
+/// *hover* debounce, but must not cancel one a step started: scrolling the
 /// selected row into view moves the list under a stationary pointer, and the
 /// crossing events that produces are not the user changing their mind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PreviewSource {
     Hover,
-    Wheel,
+    /// The wheel, or an explicit step — hold-mode Mod+Tab, `svitek next|prev`.
+    /// They are the same gesture as far as the panel is concerned: move the
+    /// selection by N rows without the pointer.
+    Step,
 }
 
 /// A preview waiting out the debounce: the workspace it will switch to, and the
@@ -204,6 +224,9 @@ pub struct Panel {
     /// `config.close_on_select`: whether clicking a row closes the panel (the
     /// default) or only moves the origin to it and leaves the panel up.
     close_on_select: bool,
+    /// `config.mode`. Only `Hold` makes a modifier release commit; everything
+    /// else in this module is written once for both modes.
+    mode: Mode,
     visible: Cell<bool>,
     /// The workspace that was focused when the panel was shown, for as long as
     /// it is shown. The `.focused` marker stays on *this* row the whole time,
@@ -232,6 +255,11 @@ pub struct Panel {
     hover_armed: Cell<bool>,
     /// When the panel was last shown; `PREVIEW_GRACE` is measured from here.
     shown_at: Cell<Option<Instant>>,
+    /// Hold mode only: whether the "is the modifier still down?" check has
+    /// already run for this showing. The window can go active more than once,
+    /// and the question is only ever asked about the press that opened the
+    /// panel. Reset by `show()`.
+    hold_checked: Cell<bool>,
     /// Set by `commit()` just before `hide()`, so the `hidden` callback knows
     /// this hide is a commit and must not revert the preview. Read (and
     /// cleared) inside `hide()`, which is what makes the two race-free: they
@@ -385,6 +413,7 @@ impl Panel {
             callbacks,
             thumb_width,
             close_on_select: config.close_on_select,
+            mode: config.mode,
             visible: Cell::new(false),
             origin: RefCell::new(None),
             previewed: RefCell::new(None),
@@ -392,6 +421,7 @@ impl Panel {
             wheel_accum: Cell::new(0.0),
             hover_armed: Cell::new(false),
             shown_at: Cell::new(None),
+            hold_checked: Cell::new(false),
             committed: Cell::new(false),
             me: RefCell::new(Weak::new()),
         });
@@ -422,7 +452,42 @@ impl Panel {
                 _ => glib::Propagation::Proceed,
             }
         });
+        // Hold mode: letting go of the modifier is Enter. The panel holds
+        // exclusive keyboard focus, so the release of the Super the user is
+        // holding down for their Mod+Tab binding is delivered here — the Tab
+        // itself never is, sway consumes the whole combination and runs the
+        // binding. Same controller, same CAPTURE phase, same reason.
+        let weak = Rc::downgrade(&panel);
+        keys.connect_key_released(move |_, key, _, _| {
+            let Some(p) = weak.upgrade() else { return };
+            if p.mode == Mode::Hold && is_commit_modifier(key) {
+                log::debug!("hold mode: modifier {key:?} released");
+                p.commit_selection_as("modifier release");
+            }
+        });
         panel.window.add_controller(keys);
+
+        // Hold mode, the fast tap: on a quick Mod+Tab the modifier can already
+        // be up by the time the layer surface has keyboard focus, so no release
+        // event will ever arrive and the panel would sit there forever. The
+        // first moment we can tell is when the window goes active — that is
+        // wl_keyboard.enter, which carries the modifier state — so ask then.
+        let weak = Rc::downgrade(&panel);
+        panel.window.connect_is_active_notify(move |w| {
+            let Some(p) = weak.upgrade() else { return };
+            if p.mode != Mode::Hold || !p.visible.get() || !w.is_active() {
+                return;
+            }
+            if p.hold_checked.replace(true) {
+                return;
+            }
+            let held = seat_modifiers();
+            log::debug!("hold mode: keyboard focus arrived with modifiers {held:?}");
+            if !held.intersects(COMMIT_MODIFIER_MASKS) {
+                log::debug!("hold mode: the modifier was already up when the panel mapped");
+                p.commit_selection_as("modifier already up");
+            }
+        });
 
         // --- the wheel -------------------------------------------------------
         // On the *window*, in the CAPTURE phase, and always claimed: a wheel
@@ -552,6 +617,7 @@ impl Panel {
         self.wheel_accum.set(0.0);
         self.hover_armed.set(false);
         self.shown_at.set(Some(Instant::now()));
+        self.hold_checked.set(false);
         self.mark_previewing(None);
         self.visible.set(true);
         self.window.present();
@@ -718,11 +784,37 @@ impl Panel {
         if steps == 0 {
             return;
         }
+        // Clamped, not wrapped: a spin must never take the user somewhere they
+        // were not aiming for. (An explicit step — Mod+Tab, `next`/`prev` — is
+        // a cycle instead; see `step`.)
+        self.step_selection(steps, false, "wheel");
+    }
 
-        // Count from whatever is live right now: the row a preview is already
-        // waiting to switch to, else the previewed row, else the origin. That
-        // is what makes hover and wheel one selection — and what makes four
-        // quick steps land four rows down rather than one.
+    /// Move the selection `steps` rows on and preview it, exactly as a wheel
+    /// detent does — the path Mod+Tab in hold mode and `svitek next|prev` take.
+    ///
+    /// Wrapping, because this one *is* a cycle: pressing Mod+Tab past the last
+    /// workspace comes back round to the first, the way alt-tab does. Unlike
+    /// the wheel it also ignores `PREVIEW_GRACE`: the grace period is there for
+    /// pointer and wheel events that were already in flight when the surface
+    /// mapped, and a second Mod+Tab within 150 ms of the first is not one of
+    /// those — it is the user tabbing quickly, and dropping it would be a bug.
+    pub fn step(&self, steps: i32) {
+        if !self.visible.get() {
+            return;
+        }
+        self.step_selection(steps, true, "step");
+    }
+
+    /// The shared half of the wheel and of `step`: count from whatever is live
+    /// right now, move `steps` rows (wrapping or clamped), arm the debounce and
+    /// scroll the selection into view.
+    ///
+    /// "Live" is the row a preview is already waiting to switch to, else the
+    /// previewed row, else the origin. That is what makes hover, wheel and Tab
+    /// one selection — and what makes four quick steps land four rows away
+    /// rather than one.
+    fn step_selection(&self, steps: i32, wrap: bool, why: &str) {
         let (base, len, target) = {
             let rows = self.rows.borrow();
             if rows.is_empty() {
@@ -738,31 +830,43 @@ impl Panel {
             let base = live
                 .and_then(|n| rows.iter().position(|r| r.name == n))
                 .unwrap_or(0);
-            let target = clamp_step(base, steps, rows.len());
+            let target = if wrap {
+                wrap_step(base, steps, rows.len())
+            } else {
+                clamp_step(base, steps, rows.len())
+            };
             (base, rows.len(), target)
         };
 
         if target == base {
-            log::debug!("wheel {steps:+} clamped at row {base} of {len}; selection unchanged");
+            log::debug!("{why} {steps:+} stays at row {base} of {len}; selection unchanged");
             return;
         }
         let (name, num) = {
             let rows = self.rows.borrow();
             (rows[target].name.clone(), rows[target].num)
         };
-        log::debug!("wheel {steps:+}: selection {base} -> {target} ({name:?})");
-        // The wheel acted last, so it owns the selection: a crossing event
+        log::debug!("{why} {steps:+}: selection {base} -> {target} ({name:?})");
+        // The step acted last, so it owns the selection: a crossing event
         // produced by the list scrolling below must not re-arm hovering behind
         // its back. A real pointer motion arms it again.
         self.hover_armed.set(false);
-        self.arm_preview(&name, num, PreviewSource::Wheel);
+        self.arm_preview(&name, num, PreviewSource::Step);
         self.scroll_name_into_view(&name);
     }
 
-    /// Enter: take the selection for real. The selection is what a preview is
-    /// on its way to, else what is being previewed (the origin, until something
-    /// moved it), and `commit` does the rest.
+    /// Enter: take the selection for real.
     fn commit_selection(&self) {
+        self.commit_selection_as("Enter");
+    }
+
+    /// The same, named by whatever gesture asked for it (Enter, or a hold-mode
+    /// modifier release). The selection is what a preview is on its way to —
+    /// taking the *pending* target first is what makes a release during the
+    /// 120 ms debounce commit where the user was going, not where they were —
+    /// else what is being previewed (the origin, until something moved it).
+    /// `commit` does the rest.
+    fn commit_selection_as(&self, why: &str) {
         let pending = self.pending.borrow().as_ref().map(|p| (p.name.clone(), p.num));
         let target = pending.or_else(|| {
             let previewed = self.previewed.borrow().clone();
@@ -771,7 +875,7 @@ impl Panel {
                 (name, num)
             })
         });
-        self.commit(target, "Enter");
+        self.commit(target, why);
     }
 
     /// A row was clicked. With `close_on_select` (the default) that is a commit
@@ -844,9 +948,9 @@ impl Panel {
         }
     }
 
-    /// Cancel a pending preview only if the *pointer* started it. The wheel's
-    /// own pending must survive the pointer leaving a row, because scrolling
-    /// the selected row into view is what moved the row out from under it.
+    /// Cancel a pending preview only if the *pointer* started it. A step's own
+    /// pending must survive the pointer leaving a row, because scrolling the
+    /// selected row into view is what moved the row out from under it.
     fn cancel_hover_pending(&self) {
         let is_hover = self
             .pending
@@ -1257,6 +1361,67 @@ fn clamp_step(from: usize, steps: i32, len: usize) -> usize {
     (from as i64 + steps as i64).clamp(0, last) as usize
 }
 
+/// The same, wrapping instead of clamping: past the last row comes the first.
+/// This is what an explicit step (hold-mode Mod+Tab, `svitek next|prev`) does —
+/// a key you press repeatedly is a cycle, and stopping dead at the last
+/// workspace would make the second half of the list unreachable. The wheel
+/// keeps `clamp_step`: a spin is not a count.
+fn wrap_step(from: usize, steps: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let len = len as i64;
+    // Reduce first, so no accumulation of huge steps can overflow, and start
+    // from a base that is inside the list whatever the caller passed.
+    let base = (from as i64).rem_euclid(len);
+    (base + steps as i64 % len).rem_euclid(len) as usize
+}
+
+/// Modifier masks whose release commits in hold mode — the ones a person
+/// actually holds down for an alt-tab binding.
+///
+/// Shift is deliberately not one of them: Mod+Shift+Tab for "previous" is the
+/// other half of the same gesture, and letting go of Shift half way through must
+/// not commit.
+const COMMIT_MODIFIER_MASKS: gdk::ModifierType = gdk::ModifierType::SUPER_MASK
+    .union(gdk::ModifierType::ALT_MASK)
+    .union(gdk::ModifierType::CONTROL_MASK)
+    .union(gdk::ModifierType::META_MASK)
+    .union(gdk::ModifierType::HYPER_MASK);
+
+/// Whether releasing this key commits in hold mode: the keysyms of the same
+/// five modifiers, left and right. Kept next to `COMMIT_MODIFIER_MASKS` — the
+/// key release and the "is one still down?" query have to agree, or a tap would
+/// either commit twice or not at all.
+fn is_commit_modifier(key: gdk::Key) -> bool {
+    matches!(
+        key,
+        gdk::Key::Super_L
+            | gdk::Key::Super_R
+            | gdk::Key::Alt_L
+            | gdk::Key::Alt_R
+            | gdk::Key::Control_L
+            | gdk::Key::Control_R
+            | gdk::Key::Meta_L
+            | gdk::Key::Meta_R
+            | gdk::Key::Hyper_L
+            | gdk::Key::Hyper_R
+    )
+}
+
+/// The modifiers the seat's keyboard reports as held right now. Under Wayland
+/// this is the state GDK took from the last `wl_keyboard.modifiers`, which the
+/// compositor sends with every `enter` — so it is meaningful exactly once the
+/// surface has keyboard focus, and empty (the safe answer: "nothing held")
+/// while there is no keyboard at all.
+fn seat_modifiers() -> gdk::ModifierType {
+    gdk::Display::default()
+        .and_then(|d| d.default_seat())
+        .and_then(|s| s.keyboard())
+        .map(|k| k.modifier_state())
+        .unwrap_or_else(gdk::ModifierType::empty)
+}
+
 fn apply_thumb(row: &Row, thumb: &Thumbnail, thumb_width: i32) {
     let (w, h) = (thumb.width, thumb.height);
     let needed = (w as usize) * (h as usize) * 4;
@@ -1499,6 +1664,78 @@ mod tests {
         // No overflow on absurd input.
         assert_eq!(clamp_step(0, i32::MAX, 3), 2);
         assert_eq!(clamp_step(2, i32::MIN, 3), 0);
+    }
+
+    /// An explicit step is a cycle: Mod+Tab past the end comes back round.
+    #[test]
+    fn an_explicit_step_wraps_at_both_ends() {
+        // Forwards, off the end and round.
+        assert_eq!(wrap_step(0, 1, 3), 1);
+        assert_eq!(wrap_step(2, 1, 3), 0);
+        assert_eq!(wrap_step(0, 3, 3), 0);
+        assert_eq!(wrap_step(0, 4, 3), 1);
+        // Backwards (Mod+Shift+Tab / `svitek prev`).
+        assert_eq!(wrap_step(0, -1, 3), 2);
+        assert_eq!(wrap_step(1, -1, 3), 0);
+        assert_eq!(wrap_step(0, -4, 3), 2);
+        // Two workspaces: one step either way is the other one.
+        assert_eq!(wrap_step(0, 1, 2), 1);
+        assert_eq!(wrap_step(0, -1, 2), 1);
+        assert_eq!(wrap_step(1, 1, 2), 0);
+        // A single workspace has nowhere to go, and no rows at all is index 0.
+        assert_eq!(wrap_step(0, 1, 1), 0);
+        assert_eq!(wrap_step(0, -7, 1), 0);
+        assert_eq!(wrap_step(0, 1, 0), 0);
+        // Nothing overflows and nothing lands outside the list.
+        assert!(wrap_step(2, i32::MAX, 3) < 3);
+        assert!(wrap_step(2, i32::MIN, 3) < 3);
+        assert!(wrap_step(99, 1, 3) < 3);
+    }
+
+    /// Hold mode commits when the modifier goes up — and Shift is not one,
+    /// because Mod+Shift+Tab is how the same gesture goes backwards.
+    #[test]
+    fn only_the_held_modifiers_commit_on_release() {
+        for key in [
+            gdk::Key::Super_L,
+            gdk::Key::Super_R,
+            gdk::Key::Alt_L,
+            gdk::Key::Alt_R,
+            gdk::Key::Control_L,
+            gdk::Key::Control_R,
+            gdk::Key::Meta_L,
+            gdk::Key::Meta_R,
+            gdk::Key::Hyper_L,
+            gdk::Key::Hyper_R,
+        ] {
+            assert!(is_commit_modifier(key), "{key:?} should commit");
+        }
+        for key in [
+            gdk::Key::Shift_L,
+            gdk::Key::Shift_R,
+            gdk::Key::Caps_Lock,
+            gdk::Key::ISO_Level3_Shift,
+            gdk::Key::Tab,
+            gdk::Key::ISO_Left_Tab,
+            gdk::Key::Escape,
+            gdk::Key::Return,
+            gdk::Key::a,
+        ] {
+            assert!(!is_commit_modifier(key), "{key:?} should not commit");
+        }
+    }
+
+    /// The keysyms and the masks are two spellings of one list; a key that
+    /// commits on release must be a key the focus-in check can see is held.
+    #[test]
+    fn the_commit_masks_match_the_commit_keysyms() {
+        assert!(COMMIT_MODIFIER_MASKS.contains(gdk::ModifierType::SUPER_MASK));
+        assert!(COMMIT_MODIFIER_MASKS.contains(gdk::ModifierType::ALT_MASK));
+        assert!(COMMIT_MODIFIER_MASKS.contains(gdk::ModifierType::CONTROL_MASK));
+        assert!(COMMIT_MODIFIER_MASKS.contains(gdk::ModifierType::META_MASK));
+        assert!(COMMIT_MODIFIER_MASKS.contains(gdk::ModifierType::HYPER_MASK));
+        assert!(!COMMIT_MODIFIER_MASKS.contains(gdk::ModifierType::SHIFT_MASK));
+        assert!(!COMMIT_MODIFIER_MASKS.contains(gdk::ModifierType::LOCK_MASK));
     }
 
     #[test]

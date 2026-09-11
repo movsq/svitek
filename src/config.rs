@@ -13,6 +13,17 @@
 //! # a click switches to the workspace but leaves the panel open, so several
 //! # can be visited in a row; Enter always closes.
 //! close_on_select = true
+//! # How the toggle key behaves: "toggle" (default) is a switch — press it once
+//! # to open the panel, again to close it. "hold" is alt-tab: while the panel is
+//! # up every further `svitek toggle` steps the selection one workspace on
+//! # (wrapping), and letting go of the modifier (Super/Alt/Ctrl/Meta/Hyper)
+//! # commits it, exactly as Enter would.
+//! mode = "toggle"
+//! # Hold mode only: whether the press that opens the panel already selects
+//! # the *next* workspace (default, the alt-tab convention — a quick tap
+//! # switches), or leaves the selection on the current one so the first press
+//! # only opens the panel.
+//! hold_selects_next = true
 //!
 //! [colors]
 //! background = "#1e1e2ecc"   # panel background (RGBA hex allowed)
@@ -30,6 +41,12 @@ pub struct Config {
     pub thumbnail_width: u32,
     pub position: Position,
     pub close_on_select: bool,
+    pub mode: Mode,
+    /// Hold mode: does the opening press already step to the next workspace?
+    /// True is alt-tab (a quick tap switches to the next workspace); false
+    /// means the first press only opens the panel and the selection stays on
+    /// the workspace the user is on. Ignored in toggle mode.
+    pub hold_selects_next: bool,
     pub colors: Colors,
 }
 
@@ -39,6 +56,20 @@ pub enum Position {
     Left,
     Center,
     Right,
+}
+
+/// What the key bound to `svitek toggle` does.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// A switch: the binding opens the panel, and pressing it again closes it
+    /// and goes back where the user came from.
+    Toggle,
+    /// Alt-tab: the binding opens the panel and every further press *steps* the
+    /// selection one workspace on (wrapping), because sway consumes the key
+    /// combination itself and the panel only ever sees another `toggle`.
+    /// Releasing the modifier commits, the way Enter does.
+    Hold,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -56,6 +87,8 @@ impl Default for Config {
             thumbnail_width: 240,
             position: Position::Center,
             close_on_select: true,
+            mode: Mode::Toggle,
+            hold_selects_next: true,
             colors: Colors::default(),
         }
     }
@@ -108,6 +141,28 @@ mod tests {
         assert_eq!(c.colors.dim, Colors::default().dim);
         assert_eq!(c.position, Position::Center);
         assert!(c.close_on_select);
+        assert_eq!(c.mode, Mode::Toggle);
+        assert!(c.hold_selects_next);
+    }
+
+    #[test]
+    fn hold_selects_next_parses() {
+        let c: Config = toml::from_str("mode = \"hold\"\nhold_selects_next = false\n").unwrap();
+        assert_eq!(c.mode, Mode::Hold);
+        assert!(!c.hold_selects_next);
+    }
+
+    #[test]
+    fn mode_parses() {
+        let c: Config = toml::from_str("mode = \"hold\"\n").unwrap();
+        assert_eq!(c.mode, Mode::Hold);
+        // The other keys are untouched by it.
+        assert_eq!(c.position, Position::Center);
+        let c: Config = toml::from_str("mode = \"toggle\"\n").unwrap();
+        assert_eq!(c.mode, Mode::Toggle);
+        // Only the two spellings, and only in lowercase.
+        assert!(toml::from_str::<Config>("mode = \"Hold\"\n").is_err());
+        assert!(toml::from_str::<Config>("mode = \"alt-tab\"\n").is_err());
     }
 
     #[test]

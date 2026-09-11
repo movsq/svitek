@@ -3,6 +3,8 @@
 # screen. Prints the env vars to export. Usage:
 #   eval "$(tests/headless-sway.sh start)"   # sets SWAYSOCK, WAYLAND_DISPLAY, SVITEK_TEST_DIR
 #   tests/headless-sway.sh stop
+# SVITEK_BIN (optional) adds `bindsym $mod+Tab exec <it> toggle` (and
+# $mod+Shift+Tab -> prev) to the generated config.
 set -euo pipefail
 DIR="${SVITEK_TEST_DIR:-${XDG_RUNTIME_DIR:-/tmp}/svitek-test}"
 case "${1:-start}" in
@@ -20,6 +22,14 @@ focus_follows_mouse no
 default_border pixel 2
 bindsym $mod+a exec true
 CFG
+  # Optional: a real Mod+Tab binding, so a test can drive the alt-tab gesture
+  # through sway itself instead of the control socket. Sway's `exec` inherits
+  # sway's environment, so SVITEK_SOCKET must already be exported here for the
+  # binding to reach the *test* daemon.
+  if [ -n "${SVITEK_BIN:-}" ]; then
+    printf 'bindsym $mod+Tab exec %s toggle\n' "$SVITEK_BIN" >> "$DIR/config"
+    printf 'bindsym $mod+Shift+Tab exec %s prev\n' "$SVITEK_BIN" >> "$DIR/config"
+  fi
   # Two headless outputs: the first comes with the backend, the second via `create_output`.
   sock="$DIR/sway-ipc.sock"
   rm -f "$sock"

@@ -2,8 +2,9 @@
 //!
 //! Unix stream socket at `$XDG_RUNTIME_DIR/svitek.sock` (fallback
 //! `/tmp/svitek-<uid>.sock`). Protocol: client sends one line
-//! (`toggle` | `show` | `hide` | `quit`), server replies `ok\n` (or `err ...\n`)
-//! and closes. A stale socket file (nobody listening) is removed on bind.
+//! (`toggle` | `show` | `hide` | `next` | `prev` | `quit`), server replies
+//! `ok\n` (or `err ...\n`) and closes. A stale socket file (nobody listening)
+//! is removed on bind.
 //!
 //! `$SVITEK_SOCKET` overrides the path entirely (used by the tests and to run
 //! several instances against several compositors).

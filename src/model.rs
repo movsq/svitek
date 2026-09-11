@@ -111,6 +111,11 @@ pub enum Command {
     Toggle,
     Show,
     Hide,
+    /// Step the selection one workspace on (wrapping), or show the panel when
+    /// it is down. Bind it next to `toggle` for an explicit "previous/next".
+    Next,
+    /// The same, one workspace back.
+    Prev,
     Quit,
 }
 
@@ -120,6 +125,8 @@ impl Command {
             "toggle" => Some(Command::Toggle),
             "show" => Some(Command::Show),
             "hide" => Some(Command::Hide),
+            "next" => Some(Command::Next),
+            "prev" => Some(Command::Prev),
             "quit" => Some(Command::Quit),
             _ => None,
         }
@@ -129,6 +136,8 @@ impl Command {
             Command::Toggle => "toggle",
             Command::Show => "show",
             Command::Hide => "hide",
+            Command::Next => "next",
+            Command::Prev => "prev",
             Command::Quit => "quit",
         }
     }
@@ -180,6 +189,29 @@ pub enum Msg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every command parses from its own name and prints back as it, and
+    /// nothing else parses at all — the control socket and the argv parser are
+    /// both this one function.
+    #[test]
+    fn commands_round_trip_through_their_names() {
+        for cmd in [
+            Command::Toggle,
+            Command::Show,
+            Command::Hide,
+            Command::Next,
+            Command::Prev,
+            Command::Quit,
+        ] {
+            assert_eq!(Command::parse(cmd.as_str()), Some(cmd));
+        }
+        // The socket hands the line over with its newline still on it.
+        assert_eq!(Command::parse("next\n"), Some(Command::Next));
+        assert_eq!(Command::parse("  prev  "), Some(Command::Prev));
+        assert_eq!(Command::parse("NEXT"), None);
+        assert_eq!(Command::parse("previous"), None);
+        assert_eq!(Command::parse(""), None);
+    }
 
     fn win(id: i64, title: &str, focused: bool) -> WindowInfo {
         WindowInfo {

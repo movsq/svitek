@@ -52,11 +52,35 @@
 //!     lands on the mapped panel. `xkb_mod_mask` is held around the key
 //!     (Mod4/Super = 64), the way wtype does it.
 //!
-//!     Useful evdev codes: 1 = Escape, 28 = Return, 30 = A, 2..11 = 1..0.
+//!     Useful evdev codes: 1 = Escape, 15 = Tab, 28 = Return, 30 = A,
+//!     125 = Left Super/Meta, 2..11 = 1..0.
+//!
+//! inject hold <mod-evdev-code|0> <xkb_mod_mask> <setup_ms> [action ...]
+//!     The alt-tab gesture: create the virtual keyboard, wait `setup_ms` (so
+//!     the seat advertises a keyboard before anything is shown), press and HOLD
+//!     the modifier, run the actions in order, then release it and linger
+//!     ~600 ms so the release is delivered. `0 0` for the modifier holds
+//!     nothing at all, which is how the "modifier was already up" race is
+//!     tested: a keyboard exists on the seat (so a layer surface can take
+//!     keyboard focus) but no modifier is down.
+//!
+//!     BOTH halves are needed, and this is the whole reason this subcommand
+//!     exists. Measured on sway 1.12 / wlroots: a virtual keyboard's *key*
+//!     events do not move sway's own modifier state, so pressing evdev 125
+//!     (Super_L) alone makes `bindsym Mod4+Tab` fire exactly zero times; the
+//!     explicit `modifiers` request (Mod4 = 64) is what sway matches bindings
+//!     against. But `modifiers` alone sends no *key* event, so a client
+//!     watching for the release of the Super key would never see one. So we
+//!     send the mask AND the real key, and undo them in the opposite order.
+//!
+//!     Actions:
+//!       key:<code>    press+release that evdev key (while the modifier is down)
+//!       sleep:<ms>    wait
+//!       run:<command> run `sh -c <command>` and wait for it
 //! ```
 //!
-//! Both subcommands print one `inject: …` line on success and exit 0; a
-//! missing protocol or a bad argument panics / exits non-zero.
+//! Every subcommand prints `inject: …` progress lines on success and exits 0;
+//! a missing protocol or a bad argument panics / exits non-zero.
 
 use std::os::fd::AsFd;
 
@@ -302,26 +326,9 @@ fn main() {
             // `delay_ms`, so the seat already has keyboard capability (and sway
             // has settled its keyboard focus) before the panel is shown.
             let delay_ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let mgr = st.keyboard_mgr.clone().expect("no virtual keyboard manager");
-            let kb = mgr.create_virtual_keyboard(&seat, &qh, ());
-
-            // A real xkb keymap is required before any key event.
-            let keymap = std::process::Command::new("xkbcli")
-                .args(["compile-keymap", "--layout", "us"])
-                .output()
-                .expect("xkbcli");
-            let mut file = tempfile();
-            use std::io::{Seek, Write};
-            file.write_all(&keymap.stdout).unwrap();
-            file.write_all(&[0]).unwrap();
-            file.flush().unwrap();
-            file.rewind().unwrap();
-            kb.keymap(1, file.as_fd(), (keymap.stdout.len() + 1) as u32);
-            conn.flush().unwrap();
-            queue.roundtrip(&mut st).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(400));
+            use std::io::Write;
+            let kb = keyboard(&mut st, &seat, &qh, &conn, &mut queue);
             println!("inject: virtual keyboard ready; waiting {delay_ms} ms");
-            // (stdout already flushed via Write in scope above)
             std::io::stdout().flush().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
 
@@ -346,16 +353,118 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(500));
             println!("inject: key {code} sent");
         }
+        Some("hold") => {
+            let mod_code: u32 = args[2].parse().expect("hold needs <mod-evdev-code|0>");
+            let mod_mask: u32 = args[3].parse().expect("hold needs <xkb_mod_mask>");
+            let setup_ms: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+            use std::io::Write;
+            let kb = keyboard(&mut st, &seat, &qh, &conn, &mut queue);
+            println!("inject: virtual keyboard ready; waiting {setup_ms} ms");
+            std::io::stdout().flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(setup_ms));
+
+            if mod_mask != 0 {
+                kb.modifiers(mod_mask, 0, 0, 0);
+                conn.flush().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            if mod_code != 0 {
+                kb.key(now(), mod_code, PRESSED);
+                conn.flush().unwrap();
+                // Give sway time to tell the focused surface about it before
+                // anything else happens.
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+            println!("inject: modifier {mod_code} (mask {mod_mask}) down");
+            std::io::stdout().flush().unwrap();
+
+            for action in args.iter().skip(5) {
+                let (kind, rest) = action.split_once(':').unwrap_or((action.as_str(), ""));
+                match kind {
+                    "key" => {
+                        let code: u32 = rest.parse().expect("key:<evdev-code>");
+                        kb.key(now(), code, PRESSED);
+                        conn.flush().unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(60));
+                        kb.key(now(), code, RELEASED);
+                        conn.flush().unwrap();
+                        println!("inject: key {code} tapped");
+                    }
+                    "sleep" => {
+                        let ms: u64 = rest.parse().expect("sleep:<ms>");
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                    }
+                    "run" => {
+                        let status = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(rest)
+                            .status()
+                            .expect("sh");
+                        println!("inject: ran {rest:?} -> {status}");
+                    }
+                    _ => panic!("unknown action {action:?}"),
+                }
+                std::io::stdout().flush().unwrap();
+            }
+
+            if mod_code != 0 {
+                kb.key(now(), mod_code, RELEASED);
+                conn.flush().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            if mod_mask != 0 {
+                kb.modifiers(0, 0, 0, 0);
+                conn.flush().unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            println!("inject: modifier {mod_code} up");
+        }
         other => {
             eprintln!(
                 "usage: inject pointer <output> <x> <y> [click]\n\
                         inject scroll <output> <x> <y> <steps>   (+ = wheel down)\n\
-                        inject key|keyhold <evdev-code> [delay_ms] [xkb_mod_mask]"
+                        inject key|keyhold <evdev-code> [delay_ms] [xkb_mod_mask]\n\
+                        inject hold <mod-evdev-code|0> <xkb_mod_mask> <setup_ms>\n\
+                        \x20   [key:<c>|sleep:<ms>|run:<cmd>]..."
             );
             eprintln!("got {other:?}");
             std::process::exit(2);
         }
     }
+}
+
+/// Create the virtual keyboard and give it a real xkb keymap — required before
+/// any key event, and the reason the key codes below are evdev codes on a `us`
+/// layout. Returns once sway has had a moment to notice the new device: the
+/// seat starts with no keyboard capability at all on the headless backend.
+fn keyboard(
+    st: &mut State,
+    seat: &wl_seat::WlSeat,
+    qh: &QueueHandle<State>,
+    conn: &Connection,
+    queue: &mut wayland_client::EventQueue<State>,
+) -> ZwpVirtualKeyboardV1 {
+    let mgr = st
+        .keyboard_mgr
+        .clone()
+        .expect("no virtual keyboard manager");
+    let kb = mgr.create_virtual_keyboard(seat, qh, ());
+
+    let keymap = std::process::Command::new("xkbcli")
+        .args(["compile-keymap", "--layout", "us"])
+        .output()
+        .expect("xkbcli");
+    let mut file = tempfile();
+    use std::io::{Seek, Write};
+    file.write_all(&keymap.stdout).unwrap();
+    file.write_all(&[0]).unwrap();
+    file.flush().unwrap();
+    file.rewind().unwrap();
+    kb.keymap(1, file.as_fd(), (keymap.stdout.len() + 1) as u32);
+    conn.flush().unwrap();
+    queue.roundtrip(st).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    kb
 }
 
 fn tempfile() -> std::fs::File {

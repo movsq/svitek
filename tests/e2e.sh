@@ -81,9 +81,11 @@ panel_visible() { # "yes" when the focused-row border is on screen
 # The name of the workspace sway has focused right now. Shell only (the
 # ImageMagick path of this script must work without python3): every workspace
 # object in `get_workspaces` prints its "name" before its "focused".
-focused_ws() {
-  swaymsg -t get_workspaces |
-    grep -oE '"name": "[^"]*"|"focused": (true|false)' |
+focused_ws() { swaymsg -t get_workspaces | focused_ws_in /dev/stdin; }
+# The same, from a saved `get_workspaces` dump: the hold-mode probes run from
+# inside the injector (while the modifier is held) and are read back afterwards.
+focused_ws_in() {
+  grep -oE '"name": "[^"]*"|"focused": (true|false)' "$1" |
     awk -F'"' '/"name"/ { n = $4 } /focused/ { if ($0 ~ /true/) { print n; exit } }'
 }
 foot_on() { # foot_on <workspace> <title> [script-to-run-in-it]
@@ -136,10 +138,14 @@ INJECT=./target/release/inject
 
 step "headless sway"
 rm -rf "$SVITEK_TEST_DIR"; mkdir -p "$SVITEK_TEST_DIR/cfg/svitek"
+# Both of these have to be exported *before* sway starts: sway's `exec` inherits
+# sway's environment, so this is what makes the `bindsym $mod+Tab exec svitek
+# toggle` that headless-sway.sh adds for SVITEK_BIN talk to *our* daemon.
+export SVITEK_SOCKET="$SVITEK_TEST_DIR/svitek.sock"
+export SVITEK_BIN="$PWD/target/release/svitek"
 eval "$(tests/headless-sway.sh start)" || exit 2
 unset I3SOCK
 export XDG_CONFIG_HOME="$SVITEK_TEST_DIR/cfg"     # our own config, whatever the user has
-export SVITEK_SOCKET="$SVITEK_TEST_DIR/svitek.sock"
 write_config
 
 echo 'sleep 4000' > "$SVITEK_TEST_DIR/idle.sh"
@@ -250,6 +256,130 @@ $INJECT scroll HEADLESS-1 640 360 1 >/dev/null 2>&1; sleep 0.9
 check "$(focused_ws)" 2 "a wheel step down previews the card to the right"
 $SVITEK hide; sleep 0.7
 check "$(focused_ws)" 1 "hiding reverts to the origin workspace"
+
+step "hold mode"
+# `mode = "hold"` is alt-tab: sway consumes Mod+Tab and runs the binding, so the
+# panel only ever sees another `svitek toggle` — which steps the selection
+# instead of hiding — and letting go of Super commits. Driven through the *real*
+# key path: headless-sway.sh bound $mod+Tab to `svitek toggle` (SVITEK_BIN was
+# exported before sway started, so the binding reaches this daemon), and
+# `inject hold` holds Super down around the whole sequence. That is what proves
+# both halves: sway never delivers the Tab to the panel, and the binding fires
+# again for every Tab while Super stays down.
+#
+# The probes run from inside the injector, while Super is still held: each one
+# saves a screenshot and a `get_workspaces` dump that is read back below.
+$SVITEK quit; sleep 1
+DAEMON_STARTED=
+# `hold_selects_next = false` here so the first Mod+Tab only opens the panel and
+# the sequences below count from the origin; the default is checked in (f).
+write_config 'mode = "hold"' 'hold_selects_next = false'   # `position = "left"` too, so PANEL_W still holds
+start_daemon || exit 1
+cat > "$SVITEK_TEST_DIR/probe.sh" <<'PROBE'
+#!/bin/sh
+grim -o HEADLESS-1 "$SVITEK_TEST_DIR/hold-$1.png"
+swaymsg -t get_workspaces > "$SVITEK_TEST_DIR/hold-$1.json"
+PROBE
+chmod +x "$SVITEK_TEST_DIR/probe.sh"
+PROBE="$SVITEK_TEST_DIR/probe.sh"
+SUPER=125   # evdev KEY_LEFTMETA
+MOD4=64     # the xkb modifier mask sway matches $mod against
+TAB=15
+hold_panel() { focus_marker_in "$SVITEK_TEST_DIR/hold-$1.png" 0 "$PANEL_W"; }
+hold_ws() { focused_ws_in "$SVITEK_TEST_DIR/hold-$1.json"; }
+
+# (a) Super down, Tab, Tab, Super up.
+swaymsg workspace 1 >/dev/null; sleep 1
+$INJECT hold $SUPER $MOD4 1200 \
+  key:$TAB sleep:1200 run:"$PROBE a1" \
+  key:$TAB sleep:1200 run:"$PROBE a2" >/dev/null 2>&1
+sleep 0.8
+check "$(hold_panel a1)" yes "Mod+Tab shows the panel"
+check "$(hold_ws a1)" 1 "the selection starts on the workspace we came from"
+check "$(hold_panel a2)" yes "a second Mod+Tab does not hide the panel"
+check "$(hold_ws a2)" 2 "it steps the selection on and previews workspace 2"
+check "$(panel_visible)" no "releasing Super hides the panel"
+check "$(focused_ws)" 2 "releasing Super commits workspace 2"
+if grep -q 'modifier release commits workspace "2"' "$LOG"; then pass "the daemon logged the commit"
+else fail "no 'modifier release commits workspace \"2\"' in $LOG"; fi
+
+# (b) One Tab too many wraps: with two workspaces the third Tab is back on the
+# one we started from, so the release is a plain hide that goes nowhere.
+swaymsg workspace 1 >/dev/null; sleep 1
+$INJECT hold $SUPER $MOD4 1200 \
+  key:$TAB sleep:900 key:$TAB sleep:900 key:$TAB sleep:1200 run:"$PROBE b1" >/dev/null 2>&1
+sleep 0.8
+check "$(hold_panel b1)" yes "the panel is still up after three Mod+Tabs"
+check "$(hold_ws b1)" 1 "the third step wraps round to workspace 1"
+check "$(panel_visible)" no "releasing Super hides it"
+check "$(focused_ws)" 1 "and leaves sway on workspace 1"
+if grep -q 'modifier release commits the origin workspace' "$LOG"; then
+  pass "committing the origin is logged as a plain hide"
+else fail "no 'modifier release commits the origin workspace' in $LOG"; fi
+
+# (c) `next` / `prev` work in both modes: from hidden they show the panel, from
+# up they step the selection. `hide` still reverts, modifier held or not.
+swaymsg workspace 1 >/dev/null; sleep 1
+$INJECT hold $SUPER $MOD4 1200 \
+  run:"$SVITEK_BIN next" sleep:1000 run:"$PROBE c1" \
+  run:"$SVITEK_BIN next" sleep:1000 run:"$PROBE c2" \
+  run:"$SVITEK_BIN prev" sleep:1000 run:"$PROBE c3" \
+  run:"$SVITEK_BIN hide" sleep:800 run:"$PROBE c4" >/dev/null 2>&1
+sleep 0.5
+check "$(hold_panel c1)" yes "next shows the panel when it is down"
+check "$(hold_ws c1)" 1 "showing it does not move the selection"
+check "$(hold_ws c2)" 2 "next steps the selection on"
+check "$(hold_ws c3)" 1 "prev steps it back"
+check "$(hold_panel c4)" no "hide closes it"
+check "$(hold_ws c4)" 1 "and leaves sway where the panel was opened"
+
+# (d) Two Mod+Tabs in one breath, possibly inside the ~60 ms the show waits for
+# its fresh frame: the second one must be queued behind the pending show, never
+# swallowed. Either way the selection ends up one workspace on.
+swaymsg workspace 1 >/dev/null; sleep 1
+$INJECT hold $SUPER $MOD4 1200 key:$TAB key:$TAB sleep:1200 run:"$PROBE d1" >/dev/null 2>&1
+sleep 0.8
+check "$(hold_panel d1)" yes "two quick Mod+Tabs leave the panel up"
+check "$(hold_ws d1)" 2 "and the selection one workspace on"
+check "$(focused_ws)" 2 "releasing Super commits it"
+
+# (e) The race: a tap so short that Super is already up before the surface has
+# keyboard focus, so no release event will ever arrive. Here it is a `toggle`
+# with no modifier held at all (the injector still creates the keyboard, or the
+# seat would have none and the layer surface would never take focus). The panel
+# must notice and commit at once rather than sitting there forever.
+swaymsg workspace 1 >/dev/null; sleep 1
+$INJECT hold 0 0 1200 run:"$SVITEK_BIN toggle" sleep:1000 run:"$PROBE e1" >/dev/null 2>&1
+check "$(hold_panel e1)" no "a panel opened with the modifier already up closes itself"
+check "$(focused_ws)" 1 "and leaves sway where it was"
+if grep -q 'the modifier was already up when the panel mapped' "$LOG"; then
+  pass "the daemon logged the already-up modifier"
+else fail "no 'the modifier was already up' in $LOG"; fi
+
+# (f) The default, `hold_selects_next = true`: the opening press already selects
+# the next workspace, so a single Mod+Tab tap is a switch — alt-tab's rule.
+$SVITEK quit; sleep 1
+DAEMON_STARTED=
+write_config 'mode = "hold"'
+start_daemon || exit 1
+swaymsg workspace 1 >/dev/null; sleep 1
+$INJECT hold $SUPER $MOD4 1200 key:$TAB sleep:1200 run:"$PROBE f1" >/dev/null 2>&1
+sleep 0.8
+check "$(hold_panel f1)" yes "with hold_selects_next the first Mod+Tab shows the panel"
+check "$(hold_ws f1)" 2 "and already previews the next workspace"
+check "$(panel_visible)" no "releasing Super hides it"
+check "$(focused_ws)" 2 "and lands on workspace 2"
+# The quick tap: Super is up again almost at once, and that alone must switch.
+swaymsg workspace 1 >/dev/null; sleep 1
+$INJECT hold $SUPER $MOD4 1200 key:$TAB sleep:40 >/dev/null 2>&1
+sleep 1.2
+check "$(panel_visible)" no "a quick tap does not leave the panel up"
+check "$(focused_ws)" 2 "a quick Mod+Tab tap switches to the next workspace"
+
+# A picture of the interesting moment, for a human to look at.
+if [ -d "$HOME/.cache/svitek-worktrees/shots" ]; then
+  cp "$SVITEK_TEST_DIR/hold-a2.png" "$HOME/.cache/svitek-worktrees/shots/hold-after-second-tab.png"
+fi
 
 step "quit"
 $SVITEK quit; sleep 1

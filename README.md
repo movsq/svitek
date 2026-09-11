@@ -48,6 +48,14 @@ it.
   multi-output setup is that the surface covers only the output the panel is on
   — a click on another screen does not close the panel (it does move sway's
   focus there); `Esc` and `Mod+A` work from anywhere.
+* **`mode = "hold"` turns all of that into alt-tab.** With it, the key that
+  opens the panel keeps working while the panel is up: every further press
+  steps the selection one workspace on — round to the first again after the
+  last, because a key you tap repeatedly is a cycle — and **letting go of the
+  modifier commits**, exactly as `Enter` does. Nothing else changes: hovering,
+  the wheel, `Enter`, clicks, `Esc` and a click outside all mean what they mean
+  in the default `toggle` mode. `svitek next` and `svitek prev` do the same
+  stepping in both modes, so `$mod+Shift+Tab` can walk backwards.
 * A preview is a **real workspace switch** — sway renders only the workspace it
   is showing, so there is no other way to see one live. That means sway fires
   its usual `workspace` events for every preview, and anything watching them
@@ -120,6 +128,26 @@ Note that `$mod+a` is `focus parent` in sway's default config. The last
 any `include`), move `focus parent` to another key if you use it, or bind svitek
 to something else entirely.
 
+For the alt-tab shape of the same thing, set `mode = "hold"` in the config and
+bind the toggle to a key you press *with* a modifier:
+
+```
+exec svitek
+bindsym $mod+Tab exec svitek toggle
+bindsym $mod+Shift+Tab exec svitek prev
+```
+
+Hold `$mod`, tap `Tab` to open the panel with the next workspace already
+selected (so a quick tap is a switch, the way alt-tab is), tap it again for each
+further workspace, and let go of `$mod` to land there. Set
+`hold_selects_next = false` if you would rather the first press only opened the
+panel. Sway resolves the
+binding itself, so the panel never sees the `Tab` at all — every press arrives
+as another `svitek toggle`, which in this mode means "one workspace on" rather
+than "close". Any of Super, Alt, Ctrl, Meta or Hyper works as the held key
+(Shift does not count, so `$mod+Shift+Tab` can go backwards without committing
+when you let Shift go).
+
 ## Commands
 
 | command | what it does |
@@ -127,6 +155,7 @@ to something else entirely.
 | `svitek` | run the resident panel (this is what `exec` starts) |
 | `svitek toggle` | show the panel, or hide it if it is up |
 | `svitek show` / `svitek hide` | one direction only |
+| `svitek next` / `svitek prev` | show the panel, or — if it is already up — move the selection one workspace on/back (wrapping) and preview it |
 | `svitek quit` | stop the resident process |
 | `svitek --help` / `svitek --version` | |
 
@@ -150,6 +179,15 @@ position = "center"
 # Close the panel as soon as a workspace is clicked (default); `false` switches
 # but leaves it open, so several workspaces can be visited. Enter always closes.
 close_on_select = true
+# What the key bound to `svitek toggle` does. "toggle" (default) is a switch:
+# press to open, press again to close. "hold" is alt-tab: while the panel is up
+# every further press steps the selection one workspace on (wrapping), and
+# releasing the modifier commits it. See "Sway config" above for the bindings.
+mode = "toggle"
+# Hold mode only. true (default): the press that opens the panel already selects
+# the *next* workspace, like alt-tab — a quick tap switches. false: the first
+# press only opens the panel and the selection stays where you are.
+hold_selects_next = true
 
 [colors]
 background = "#1e1e2ecc"   # panel background (RGBA hex allowed)
@@ -189,8 +227,11 @@ Use `SVITEK_TEST_DIR` to keep parallel headless instances apart. The unit tests
 toggle/show/hide/quit, the 1 → 2 → back-to-1 thumbnail check (a pixel test on
 the preview), a click on a row in both `close_on_select` modes and, with the
 daemon restarted on the default config, the centered strip (where its focus
-marker lands on screen, a click outside it, a wheel step to the next card) — and
-exits non-zero if anything fails. It needs `foot`, `grim` and
+marker lands on screen, a click outside it, a wheel step to the next card) and,
+with `mode = "hold"`, the whole alt-tab gesture driven through a real
+`bindsym $mod+Tab` in the nested sway (stepping, wrapping, `next`/`prev`,
+committing on the release of Super, and the race where Super is already up
+before the panel maps) — and exits non-zero if anything fails. It needs `foot`, `grim` and
 either python3 + PIL or ImageMagick. `tools/inject/` is a separate test-only
 crate that fakes pointer motion, clicks, wheel steps and key presses on the
 headless seat, which has no input devices; see the comment at the top of

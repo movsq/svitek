@@ -23,13 +23,17 @@ decision to write the code.
 * **Keyboard navigation in the panel (j/k and friends).** Half of this is
   built: the scroll wheel moves a selection, previews it, and `Enter` commits
   it, so the questions this entry used to ask are answered — the selection is
-  `Panel::previewed` (no separate focus model), it clamps instead of wrapping,
-  it previews exactly the way hovering does, and hover and wheel share it so
-  whichever acted last wins. What is still missing is the *keys*: j/k, arrows,
-  Home/End, and a workspace-number shortcut. They would reuse the same
-  `arm_preview` path the wheel uses, so the remaining decisions are small ones
-  about which bindings to spend — and what `Mod+A` should do while a row is
-  selected (today it hides and reverts, like Esc).
+  `Panel::previewed` (no separate focus model), it previews exactly the way
+  hovering does, and hover and wheel share it so whichever acted last wins; a
+  wheel spin clamps at the ends, an explicit step wraps. The other question it
+  used to ask — what the toggle key should do while a row is selected — now has
+  two answers, and they are a config key: `mode = "toggle"` hides and reverts,
+  like Esc, and `mode = "hold"` steps the selection on and commits when the
+  modifier goes up (`svitek next`/`prev` are the same step, bindable on their
+  own). What is left is genuinely only the keys *inside* the panel: j/k,
+  arrows, Home/End, and a workspace-number shortcut. They would reuse the
+  `step_selection`/`arm_preview` path the wheel and Tab already use, so the
+  remaining decisions are small ones about which bindings to spend.
 * **Previewing a workspace that lives on another output.** The hover preview
   works because the panel is an overlay on the same output as the workspace it
   switches to. A row for a workspace on a *different* monitor would preview
