@@ -5,10 +5,10 @@ one resident process that pops a strip of workspace cards over the middle of the
 focused output, each card a thumbnail of that workspace and the window titles on
 it.
 
-<!-- screenshot: docs/screenshot-center.png, the centered strip over a real
-     session; and docs/screenshot-left.png for the column `position = "left"`
-     gives. Once they exist, drop the comment and use:
-     ![svitek: the centered card strip](docs/screenshot-center.png) -->
+![svitek: the centered card strip over a real session](docs/screenshot-center.png)
+
+*The default `center` layout: one card per workspace, the focused one marked.
+`position = "left"` gives a full-height column instead.*
 
 ## What it does
 
