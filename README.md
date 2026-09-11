@@ -249,7 +249,11 @@ them while it writes the nested sway's config:
 * `SVITEK_TEST_DIR` — where that config, the sway log and the pid file go
   (default `$XDG_RUNTIME_DIR/svitek-test`). Export your own to keep parallel
   headless instances apart; the script echoes the value back among the exports
-  either way, so `stop` finds the same directory.
+  either way, so `stop` finds the same directory. `start` refuses to run if a
+  test sway is already live there, and `stop` only kills a process that really
+  is that sway. `tests/e2e.sh` wipes the directory before each run, so there it
+  must be an absolute path whose last component starts with `svitek-` (the
+  default is `$XDG_RUNTIME_DIR/svitek-e2e-<pid>`).
 * `SVITEK_BIN` — path to a svitek binary. With it set, the generated config
   gets a real `bindsym $mod+Tab exec <it> toggle` (and `$mod+Shift+Tab` for
   `prev`), so hold mode can be driven through sway's own key handling rather
